@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
@@ -128,50 +129,70 @@ class OpenAIChatProvider:
         timeout: float | None,
     ) -> str:
         assert AsyncOpenAI is not None  # for type checkers
-        try:
-            response = await asyncio.wait_for(
-                self._client.chat.completions.create(  # type: ignore[call-arg]
-                    model=self._model_name,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a retrieval-augmented assistant. Provide concise, citation-free "
-                                "answers grounded in the supplied context."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.1,
-                    max_tokens=256,
-                ),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError as exc:
-            raise GenerationTimeoutError("OpenAI response timed out") from exc
-        except (APITimeoutError, APIConnectionError) as exc:  # type: ignore[arg-type]
-            raise ProviderUnavailableError("Failed to reach OpenAI service") from exc
-        except RateLimitError as exc:  # type: ignore[arg-type]
-            raise RateLimitedError("OpenAI rate limit exceeded") from exc
-        except (APIStatusError, APIError, OpenAIError) as exc:  # type: ignore[arg-type]
-            raise GenerationError("OpenAI generation failed") from exc
-
-        if not response or not getattr(response, "choices", None):
-            raise GenerationError("OpenAI returned an empty response")
-
-        choice = response.choices[0]
-        content = getattr(getattr(choice, "message", None), "content", None)
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        if isinstance(content, list):
-            combined = "".join(
-                segment.get("text", "") if isinstance(segment, dict) else str(segment) for segment in content
-            ).strip()
-            if combined:
-                return combined
-        if hasattr(choice, "text") and isinstance(choice.text, str) and choice.text.strip():
-            return choice.text.strip()
-        raise GenerationError("OpenAI response did not contain text content")
+        attempts = 4
+        delay = 0.5
+        deadline = time.perf_counter() + timeout if timeout is not None else None
+        last_exception: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            per_attempt_timeout: float | None = timeout
+            if deadline is not None:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    raise GenerationTimeoutError("OpenAI response timed out")
+                per_attempt_timeout = remaining
+            try:
+                response = await asyncio.wait_for(
+                    self._client.chat.completions.create(  # type: ignore[call-arg]
+                        model=self._model_name,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a retrieval-augmented assistant. Provide concise, citation-free "
+                                    "answers grounded in the supplied context."
+                                ),
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.1,
+                        max_tokens=256,
+                    ),
+                    timeout=per_attempt_timeout,
+                )
+            except asyncio.TimeoutError as exc:
+                raise GenerationTimeoutError("OpenAI response timed out") from exc
+            except RateLimitError as exc:  # type: ignore[arg-type]
+                last_exception = exc
+                if attempt == attempts:
+                    raise RateLimitedError("OpenAI rate limit exceeded") from exc
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            except (APITimeoutError, APIConnectionError) as exc:  # type: ignore[arg-type]
+                last_exception = exc
+                if attempt == attempts:
+                    raise ProviderUnavailableError("Failed to reach OpenAI service") from exc
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            except (APIStatusError, APIError, OpenAIError) as exc:  # type: ignore[arg-type]
+                raise GenerationError("OpenAI generation failed") from exc
+            if not response or not getattr(response, "choices", None):
+                raise GenerationError("OpenAI returned an empty response")
+            choice = response.choices[0]
+            content = getattr(getattr(choice, "message", None), "content", None)
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            if isinstance(content, list):
+                combined = "".join(
+                    segment.get("text", "") if isinstance(segment, dict) else str(segment) for segment in content
+                ).strip()
+                if combined:
+                    return combined
+            if hasattr(choice, "text") and isinstance(choice.text, str) and choice.text.strip():
+                return choice.text.strip()
+            raise GenerationError("OpenAI response did not contain text content")
+        raise GenerationError("OpenAI response did not contain text content") from last_exception
 
 
 class GoogleChatProvider:
@@ -204,45 +225,64 @@ class GoogleChatProvider:
                 generation_config={"temperature": 0.1, "max_output_tokens": 256},
             )
 
-        try:
-            response = await asyncio.wait_for(asyncio.to_thread(_call_model), timeout=timeout)
-        except asyncio.TimeoutError as exc:
-            raise GenerationTimeoutError("Google Generative AI response timed out") from exc
-        except Exception as exc:  # pragma: no cover - provider specific exceptions
-            if google_exceptions and isinstance(
-                exc,
-                (
-                    google_exceptions.ServiceUnavailable,
-                    google_exceptions.InternalServerError,
-                    google_exceptions.DeadlineExceeded,
-                ),
-            ):
-                raise ProviderUnavailableError("Google Generative AI service unavailable") from exc
-            if google_exceptions and isinstance(exc, google_exceptions.ResourceExhausted):
-                raise RateLimitedError("Google Generative AI rate limit exceeded") from exc
-            raise GenerationError("Google Generative AI generation failed") from exc
+        attempts = 4
+        delay = 0.5
+        deadline = time.perf_counter() + timeout if timeout is not None else None
+        last_exception: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            per_attempt_timeout: float | None = timeout
+            if deadline is not None:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    raise GenerationTimeoutError("Google Generative AI response timed out")
+                per_attempt_timeout = remaining
+            try:
+                response = await asyncio.wait_for(asyncio.to_thread(_call_model), timeout=per_attempt_timeout)
+            except asyncio.TimeoutError as exc:
+                raise GenerationTimeoutError("Google Generative AI response timed out") from exc
+            except Exception as exc:  # pragma: no cover - provider specific exceptions
+                last_exception = exc
+                if google_exceptions and isinstance(
+                    exc,
+                    (
+                        google_exceptions.ServiceUnavailable,
+                        google_exceptions.InternalServerError,
+                        google_exceptions.DeadlineExceeded,
+                    ),
+                ):
+                    if attempt == attempts:
+                        raise ProviderUnavailableError("Google Generative AI service unavailable") from exc
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                if google_exceptions and isinstance(exc, google_exceptions.ResourceExhausted):
+                    if attempt == attempts:
+                        raise RateLimitedError("Google Generative AI rate limit exceeded") from exc
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                raise GenerationError("Google Generative AI generation failed") from exc
+            if not response:
+                raise GenerationError("Google Generative AI returned an empty response")
+            text = getattr(response, "text", None)
+            if isinstance(text, str) and text.strip():
+                return text.strip()
 
-        if not response:
-            raise GenerationError("Google Generative AI returned an empty response")
+            parts = getattr(response, "candidates", None) or []
+            for candidate in parts:
+                content = getattr(candidate, "content", None)
+                if content and getattr(content, "parts", None):
+                    fragments = [
+                        getattr(part, "text", "")
+                        for part in getattr(content, "parts", [])
+                        if getattr(part, "text", "")
+                    ]
+                    combined = "".join(fragments).strip()
+                    if combined:
+                        return combined
 
-        text = getattr(response, "text", None)
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-
-        parts = getattr(response, "candidates", None) or []
-        for candidate in parts:
-            content = getattr(candidate, "content", None)
-            if content and getattr(content, "parts", None):
-                fragments = [
-                    getattr(part, "text", "")
-                    for part in getattr(content, "parts", [])
-                    if getattr(part, "text", "")
-                ]
-                combined = "".join(fragments).strip()
-                if combined:
-                    return combined
-
-        raise GenerationError("Google Generative AI response did not contain text content")
+            raise GenerationError("Google Generative AI response did not contain text content")
+        raise GenerationError("Google Generative AI response did not contain text content") from last_exception
 
 
 @dataclass
