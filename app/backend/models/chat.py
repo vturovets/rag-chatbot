@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import List
+from typing import Any, Dict, List
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -53,8 +53,8 @@ class PipelineStageDiagnostics(BaseModel):
     """Diagnostics for debug pipeline responses."""
 
     stage: str
-    input_payload: dict
-    output_payload: dict
+    input_payload: Dict[str, Any]
+    output_payload: Dict[str, Any]
     completed_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -62,8 +62,6 @@ class DebugPipelineRequest(BaseModel):
     """Request for the debug pipeline endpoint."""
 
     file_id: UUID
-    break_at: str = "generate"
-    raw: bool = False
 
 
 class DebugPipelineResponse(BaseModel):
