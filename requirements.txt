@@ -1,0 +1,29 @@
+# Core backend and API dependencies
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.6.0,<3.0.0
+python-multipart>=0.0.6
+requests>=2.31.0
+
+# Document processing
+pdfplumber>=0.10.0
+PyMuPDF>=1.23.8
+
+# Audio processing
+mutagen>=1.47.0
+
+# Retrieval and vector store
+chromadb>=0.4.24
+
+tiktoken>=0.6.0
+
+# LLM provider SDKs
+openai>=1.12.0
+google-generativeai>=0.3.2
+
+# Frontend
+streamlit>=1.31.0
+
+# Testing and tooling
+httpx>=0.27.0
+pytest>=7.4.0
