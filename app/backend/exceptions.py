@@ -50,8 +50,17 @@ def embedding_error(message: str = "Embedding generation failed.") -> RagError:
     return RagError(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, error_code="EMBEDDING_ERROR", message=message)
 
 
-def transcription_error(message: str = "Audio transcription failed.") -> RagError:
-    return RagError(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, error_code="TRANSCRIPTION_ERROR", message=message)
+def transcription_error(
+    message: str = "Audio transcription failed.",
+    *,
+    hint: str | None = None,
+) -> RagError:
+    return RagError(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        error_code="TRANSCRIPTION_ERROR",
+        message=message,
+        hint=hint,
+    )
 
 
 def rate_limit_exceeded(message: str = "Service is temporarily busy. Please try again later.") -> RagError:
