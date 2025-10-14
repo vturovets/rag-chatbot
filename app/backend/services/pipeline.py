@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import asdict
 from typing import List
 from uuid import UUID
 
@@ -21,7 +22,7 @@ from app.backend.services.extraction import ExtractionService
 from app.backend.services.session_store import SessionStore
 from app.backend.services.storage import FileStorage
 from app.backend.services.vector_store import VectorStore
-from app.common.chunking import ChunkConfig, chunk_text
+from app.common.chunking import ChunkConfig, NormalizedChunk, chunk_text
 
 
 class PipelineService:
@@ -53,19 +54,21 @@ class PipelineService:
         return transcription
 
     def _index_extracted_text(self, extraction: ExtractionResult, file_id: UUID) -> None:
-        chunks = self._chunk_text(extraction.text, file_id)
+        chunks, _ = self._chunk_text(extraction.text, file_id)
         self._vector_store.upsert(chunks)
 
     def _index_transcript(self, transcription: TranscriptionResult, file_id: UUID) -> None:
-        chunks = self._chunk_text(transcription.transcript, file_id)
+        chunks, _ = self._chunk_text(transcription.transcript, file_id)
         self._vector_store.upsert(chunks)
 
-    def _chunk_text(self, text: str, file_id: UUID) -> List[Chunk]:
+    def _chunk_text(self, text: str, file_id: UUID) -> tuple[List[Chunk], List[NormalizedChunk]]:
         config = ChunkConfig(chunk_size=self._settings.chunk_size, chunk_overlap=self._settings.chunk_overlap)
-        chunk_list = []
-        for order, piece in enumerate(chunk_text(text, config)):
-            chunk_list.append(Chunk(text=piece, source_file_id=file_id, order=order))
-        return chunk_list
+        normalized = chunk_text(text, config)
+        chunks = [
+            Chunk(text=piece.text, source_file_id=file_id, order=order)
+            for order, piece in enumerate(normalized)
+        ]
+        return chunks, normalized
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         if not request.query.strip():
@@ -107,12 +110,24 @@ class PipelineService:
         if break_at == "extract":
             return DebugPipelineResponse(stages=stages)
 
-        chunks = self._chunk_text(extraction_text, file_id)
+        chunks, normalized_chunks = self._chunk_text(extraction_text, file_id)
+        chunk_stats = {
+            "count": len(normalized_chunks),
+            "total_tokens": sum(item.token_count for item in normalized_chunks),
+        }
+        if chunk_stats["count"]:
+            chunk_stats["avg_tokens"] = chunk_stats["total_tokens"] / chunk_stats["count"]
         stages.append(
             PipelineStageDiagnostics(
                 stage="chunk",
                 input_payload={"chunk_size": self._settings.chunk_size, "overlap": self._settings.chunk_overlap},
-                output_payload={"count": len(chunks)} if not raw else {"chunks": [chunk.model_dump() for chunk in chunks]},
+                output_payload=
+                chunk_stats
+                if not raw
+                else {
+                    "chunks": [chunk.model_dump() for chunk in chunks],
+                    "token_windows": [asdict(item) for item in normalized_chunks],
+                },
             )
         )
         if break_at == "chunk":

@@ -38,6 +38,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = Field(default=None, description="API key for OpenAI services")
     openai_api_base: str | None = Field(default=None, description="Optional override for OpenAI API base URL")
+    google_api_key: str | None = Field(default=None, description="API key for Google Generative AI")
 
     class Config:
         env_prefix = "RAG_"

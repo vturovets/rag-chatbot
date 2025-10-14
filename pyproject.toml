@@ -12,6 +12,8 @@ dependencies = [
     "mutagen",
     "pymupdf",
     "openai>=1.12.0",
+    "google-generativeai",
+    "tiktoken",
     "requests",
     "streamlit",
 ]
