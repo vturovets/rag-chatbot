@@ -1,9 +1,10 @@
 """Pipeline orchestration for ingestion and chat."""
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import asdict
-from typing import List
+from typing import List, Sequence
 from uuid import UUID
 
 from app.backend import exceptions
@@ -19,6 +20,13 @@ from app.backend.models.chat import (
 from app.backend.models.ingestion import ExtractionResult, FileKind, TranscriptionResult
 from app.backend.services.embeddings import EmbeddingService
 from app.backend.services.extraction import ExtractionService
+from app.backend.services.generation import (
+    GenerationError,
+    GenerationService,
+    GenerationTimeoutError,
+    ProviderUnavailableError,
+    RateLimitedError,
+)
 from app.backend.services.session_store import SessionStore
 from app.backend.services.storage import FileStorage
 from app.backend.services.vector_store import VectorStore
@@ -35,6 +43,7 @@ class PipelineService:
         embeddings: EmbeddingService | None = None,
         vector_store: VectorStore | None = None,
         session_store: SessionStore | None = None,
+        generation: GenerationService | None = None,
     ) -> None:
         self._settings = get_settings()
         self._storage = storage or FileStorage()
@@ -42,6 +51,7 @@ class PipelineService:
         self._embeddings = embeddings or EmbeddingService()
         self._vector_store = vector_store or VectorStore(self._embeddings)
         self._sessions = session_store or SessionStore()
+        self._generation = generation or GenerationService()
 
     async def handle_pdf_upload(self, file_id: UUID) -> ExtractionResult:
         extraction = await self._extraction.extract_pdf(file_id)
@@ -75,26 +85,99 @@ class PipelineService:
             raise exceptions.missing_query()
         context = self._sessions.get_or_create(request.session_id)
         session_id = context.session_id
-        top_k = request.top_k or self._settings.top_k
+        requested_top_k = request.top_k or self._settings.top_k
+        top_k = max(1, min(requested_top_k, 8))
         start = time.perf_counter()
-        hits = self._vector_store.similarity_search(
+
+        hits = await self._retrieve_with_timeout(
             request.query,
             top_k,
             allowed_source_ids=context.active_file_ids,
         )
-        if not hits:
-            hits = self._vector_store.similarity_search(request.query, top_k)
+
         self._sessions.associate_files(session_id, [hit.source_file_id for hit in hits])
-        answer = self._generate_answer(hits)
+
+        prompt = await self._build_prompt_with_timeout(request.query, hits)
+
+        answer = await self._generate_with_guard(
+            prompt=prompt,
+            query=request.query,
+            context=[hit.text for hit in hits],
+        )
+
         latency_ms = int((time.perf_counter() - start) * 1000)
         return ChatResponse(answer=answer, latency_ms=latency_ms, session_id=session_id)
 
-    def _generate_answer(self, hits: List[RetrievalHit]) -> str:
-        contexts = [hit.text for hit in hits]
-        if not contexts:
-            return "I could not find relevant information for that question yet."
-        prompt = " ".join(contexts)
-        return f"Based on the uploaded materials, here is what I found: {prompt[:500]}"
+    async def _retrieve_with_timeout(
+        self,
+        query: str,
+        top_k: int,
+        *,
+        allowed_source_ids: Sequence[UUID],
+    ) -> List[RetrievalHit]:
+        def _search() -> List[RetrievalHit]:
+            hits = self._vector_store.similarity_search(
+                query,
+                top_k,
+                allowed_source_ids=allowed_source_ids,
+            )
+            if not hits:
+                hits = self._vector_store.similarity_search(query, top_k)
+            return hits
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(_search), timeout=self._settings.retrieval_timeout_s
+            )
+        except asyncio.TimeoutError as exc:
+            raise exceptions.timeout_stage("Processing timed out while retrieving context.") from exc
+        except Exception as exc:
+            raise exceptions.vector_db_unavailable() from exc
+
+    async def _build_prompt_with_timeout(self, query: str, hits: List[RetrievalHit]) -> str:
+        def _build() -> str:
+            snippets = []
+            for hit in hits:
+                text = " ".join(hit.text.strip().split()) if hit.text else ""
+                if text:
+                    snippets.append(text)
+            context_block = "\n".join(f"- {snippet}" for snippet in snippets[:8])
+            if not context_block:
+                return (
+                    "You are assisting with retrieval-augmented questions but no supporting context was found.\n"
+                    f"Question: {query.strip()}\n"
+                    "Answer concisely and acknowledge the lack of context."
+                )
+            instructions = (
+                "You are a retrieval-augmented assistant. Use only the provided context to answer "
+                "the question. Respond with a concise summary (max three sentences) and do not "
+                "include citations or references."
+            )
+            return f"{instructions}\n\nContext:\n{context_block}\n\nQuestion: {query.strip()}\nAnswer:"
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(_build), timeout=self._settings.prompt_timeout_s
+            )
+        except asyncio.TimeoutError as exc:
+            raise exceptions.timeout_stage("Processing timed out while preparing the prompt.") from exc
+
+    async def _generate_with_guard(self, *, prompt: str, query: str, context: Sequence[str]) -> str:
+        try:
+            return await self._generation.generate(
+                prompt=prompt,
+                query=query,
+                context=context,
+                timeout=self._settings.generation_timeout_s,
+            )
+        except GenerationTimeoutError as exc:
+            raise exceptions.generation_timeout() from exc
+        except ProviderUnavailableError as exc:
+            raise exceptions.llm_provider_down() from exc
+        except RateLimitedError as exc:
+            raise exceptions.rate_limit_exceeded() from exc
+        except GenerationError as exc:
+            raise exceptions.internal_error() from exc
 
     async def debug_pipeline(self, file_id: UUID, break_at: str, raw: bool) -> DebugPipelineResponse:
         stages: List[PipelineStageDiagnostics] = []
