@@ -80,9 +80,9 @@ def test_invalid_pdf_rejected(client, tmp_path):
             files={"file": ("image_only.pdf", stream, "application/pdf")},
         )
     assert response.status_code == 400
-    detail = response.json()["detail"]
-    assert detail["error_code"] == "INVALID_PDF_STRUCTURE"
-    assert "cannot be processed" in detail["message"].lower()
+    payload = response.json()
+    assert payload["error_code"] == "INVALID_PDF_STRUCTURE"
+    assert "cannot be processed" in payload["message"].lower()
 
 
 @pytest.mark.usefixtures("stub_transcription")
@@ -101,9 +101,9 @@ def test_debug_endpoint_requires_debug_mode(client, monkeypatch):
         json={"file_id": str(uuid4())},
     )
     assert response.status_code == 401
-    detail = response.json()["detail"]
-    assert detail["error_code"] == "UNAUTHORIZED_DEBUG"
-    assert "development mode" in detail["message"].lower()
+    payload = response.json()
+    assert payload["error_code"] == "UNAUTHORIZED_DEBUG"
+    assert "development mode" in payload["message"].lower()
 
 
 def test_chat_missing_query_validation(client):
@@ -112,6 +112,6 @@ def test_chat_missing_query_validation(client):
         json={"query": "   "},
     )
     assert response.status_code == 400
-    detail = response.json()["detail"]
-    assert detail["error_code"] == "MISSING_QUERY"
-    assert "required" in detail["message"].lower()
+    payload = response.json()
+    assert payload["error_code"] == "MISSING_QUERY"
+    assert "required" in payload["message"].lower()

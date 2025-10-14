@@ -52,6 +52,9 @@ FRIENDLY_MESSAGES: Dict[str, str] = {
     "LLM_PROVIDER_DOWN": "The language model provider is unavailable right now. Please try again soon.",
     "VECTOR_DB_UNAVAILABLE": "The search index is unavailable. Please retry shortly.",
     "GENERATION_TIMEOUT": "Generating a response took too long. Please try again.",
+    "INVALID_REQUEST": "The request payload is invalid. Please review your input and try again.",
+    "HTTP_ERROR": "We were unable to complete that request due to an HTTP error.",
+    "RESOURCE_NOT_FOUND": "The resource you requested could not be found.",
 }
 
 GENERIC_ERROR_MESSAGE = "We ran into a problem while completing that action. Please try again."
