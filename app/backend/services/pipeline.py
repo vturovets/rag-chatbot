@@ -77,7 +77,13 @@ class PipelineService:
         session_id = context.session_id
         top_k = request.top_k or self._settings.top_k
         start = time.perf_counter()
-        hits = self._vector_store.similarity_search(request.query, top_k)
+        hits = self._vector_store.similarity_search(
+            request.query,
+            top_k,
+            allowed_source_ids=context.active_file_ids,
+        )
+        if not hits:
+            hits = self._vector_store.similarity_search(request.query, top_k)
         self._sessions.associate_files(session_id, [hit.source_file_id for hit in hits])
         answer = self._generate_answer(hits)
         latency_ms = int((time.perf_counter() - start) * 1000)

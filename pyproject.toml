@@ -16,6 +16,7 @@ dependencies = [
     "tiktoken",
     "requests",
     "streamlit",
+    "chromadb",
 ]
 
 [project.optional-dependencies]
