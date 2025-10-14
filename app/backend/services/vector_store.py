@@ -34,7 +34,14 @@ class VectorStore:
         hits: List[RetrievalHit] = []
         for chunk, vector in collection.values():
             score = self._cosine_similarity(query_vector, vector)
-            hits.append(RetrievalHit(chunk_id=chunk.chunk_id, score=score, text=chunk.text))
+            hits.append(
+                RetrievalHit(
+                    chunk_id=chunk.chunk_id,
+                    score=score,
+                    text=chunk.text,
+                    source_file_id=chunk.source_file_id,
+                )
+            )
         hits.sort(key=lambda item: item.score, reverse=True)
         return hits[:top_k]
 

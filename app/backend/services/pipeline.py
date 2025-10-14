@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from typing import List
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from app.backend import exceptions
 from app.backend.config import get_settings
@@ -13,10 +13,12 @@ from app.backend.models.chat import (
     Chunk,
     DebugPipelineResponse,
     PipelineStageDiagnostics,
+    RetrievalHit,
 )
-from app.backend.models.ingestion import ExtractionResult, TranscriptionResult
+from app.backend.models.ingestion import ExtractionResult, FileKind, TranscriptionResult
 from app.backend.services.embeddings import EmbeddingService
 from app.backend.services.extraction import ExtractionService
+from app.backend.services.session_store import SessionStore
 from app.backend.services.storage import FileStorage
 from app.backend.services.vector_store import VectorStore
 from app.common.chunking import ChunkConfig, chunk_text
@@ -31,12 +33,14 @@ class PipelineService:
         extraction: ExtractionService | None = None,
         embeddings: EmbeddingService | None = None,
         vector_store: VectorStore | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         self._settings = get_settings()
         self._storage = storage or FileStorage()
         self._extraction = extraction or ExtractionService(self._storage)
         self._embeddings = embeddings or EmbeddingService()
         self._vector_store = vector_store or VectorStore(self._embeddings)
+        self._sessions = session_store or SessionStore()
 
     async def handle_pdf_upload(self, file_id: UUID) -> ExtractionResult:
         extraction = await self._extraction.extract_pdf(file_id)
@@ -66,16 +70,18 @@ class PipelineService:
     async def chat(self, request: ChatRequest) -> ChatResponse:
         if not request.query.strip():
             raise exceptions.missing_query()
-        session_id = request.session_id or uuid4()
+        context = self._sessions.get_or_create(request.session_id)
+        session_id = context.session_id
         top_k = request.top_k or self._settings.top_k
         start = time.perf_counter()
         hits = self._vector_store.similarity_search(request.query, top_k)
-        answer = self._generate_answer(request.query, hits)
+        self._sessions.associate_files(session_id, [hit.source_file_id for hit in hits])
+        answer = self._generate_answer(hits)
         latency_ms = int((time.perf_counter() - start) * 1000)
         return ChatResponse(answer=answer, latency_ms=latency_ms, session_id=session_id)
 
-    def _generate_answer(self, query: str, hits: List[Chunk | object]) -> str:
-        contexts = [hit.text for hit in hits if hasattr(hit, "text")]
+    def _generate_answer(self, hits: List[RetrievalHit]) -> str:
+        contexts = [hit.text for hit in hits]
         if not contexts:
             return "I could not find relevant information for that question yet."
         prompt = " ".join(contexts)
@@ -85,7 +91,7 @@ class PipelineService:
         stages: List[PipelineStageDiagnostics] = []
         metadata = self._storage.get_metadata(file_id)
 
-        if metadata.kind == "pdf":
+        if metadata.kind == FileKind.PDF:
             extraction = await self._extraction.extract_pdf(file_id)
             extraction_text = extraction.text
         else:
@@ -94,7 +100,7 @@ class PipelineService:
         stages.append(
             PipelineStageDiagnostics(
                 stage="extract",
-                input_payload={"file_id": str(file_id), "file_type": metadata.kind},
+                input_payload={"file_id": str(file_id), "file_type": metadata.kind.value},
                 output_payload=extraction.model_dump(),
             )
         )
@@ -135,7 +141,7 @@ class PipelineService:
         if break_at == "retrieve":
             return DebugPipelineResponse(stages=stages)
 
-        answer = self._generate_answer("debug", hits)
+        answer = self._generate_answer(hits)
         stages.append(
             PipelineStageDiagnostics(
                 stage="generate",

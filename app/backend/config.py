@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     environment: Literal["dev", "prod"] = Field("dev", description="Runtime environment")
     debug_mode: bool = Field(True, description="Enable debug endpoints")
     storage_dir: Path = Field(default=Path("storage"), description="Directory for uploaded files")
+    file_retention_hours: int = Field(24, ge=1, description="Hours to retain uploaded files")
+    session_retention_hours: int = Field(24, ge=1, description="Hours to retain chat sessions")
 
     chunk_size: int = Field(500, ge=64, description="Token target per chunk")
     chunk_overlap: int = Field(60, ge=0, description="Token overlap between chunks")

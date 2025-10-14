@@ -1,24 +1,34 @@
 """FastAPI route definitions for the RAG chatbot."""
 from __future__ import annotations
 
+from functools import lru_cache
+
 from fastapi import APIRouter, Depends, File, UploadFile
 
 from app.backend import exceptions
 from app.backend.config import Settings, get_settings
 from app.backend.models.chat import ChatRequest, ChatResponse, DebugPipelineRequest, DebugPipelineResponse
-from app.backend.models.ingestion import UploadResponse
+from app.backend.models.ingestion import FileKind, UploadResponse
 from app.backend.services.pipeline import PipelineService
+from app.backend.services.session_store import SessionStore
 from app.backend.services.storage import FileStorage
 
 router = APIRouter()
 
 
-def get_pipeline() -> PipelineService:
-    return PipelineService()
-
-
+@lru_cache()
 def get_storage() -> FileStorage:
     return FileStorage()
+
+
+@lru_cache()
+def get_session_store() -> SessionStore:
+    return SessionStore()
+
+
+@lru_cache()
+def get_pipeline() -> PipelineService:
+    return PipelineService(storage=get_storage(), session_store=get_session_store())
 
 
 def get_app_settings() -> Settings:
@@ -38,13 +48,14 @@ async def upload_pdf(
 ) -> UploadResponse:
     if file.content_type not in {"application/pdf", "application/x-pdf"}:
         raise exceptions.invalid_file_type()
-    metadata = await storage.save_upload(file, "pdf")
+    metadata = await storage.save_upload(file, FileKind.PDF)
     extraction = await pipeline.handle_pdf_upload(metadata.file_id)
     return UploadResponse(
         file_id=metadata.file_id,
         filename=metadata.filename,
-        kind="pdf",
+        kind=metadata.kind,
         page_count=extraction.pages,
+        expires_at=metadata.expires_at,
     )
 
 
@@ -56,13 +67,14 @@ async def upload_audio(
 ) -> UploadResponse:
     if file.content_type not in {"audio/mpeg", "audio/mp3", "audio/mpeg3"}:
         raise exceptions.invalid_file_type()
-    metadata = await storage.save_upload(file, "audio")
+    metadata = await storage.save_upload(file, FileKind.AUDIO)
     transcription = await pipeline.handle_audio_upload(metadata.file_id)
     return UploadResponse(
         file_id=metadata.file_id,
         filename=metadata.filename,
-        kind="audio",
+        kind=metadata.kind,
         duration_seconds=transcription.duration_seconds,
+        expires_at=metadata.expires_at,
     )
 
 

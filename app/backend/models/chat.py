@@ -1,7 +1,7 @@
 """Models related to chat operations."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List
 from uuid import UUID, uuid4
 
@@ -30,6 +30,7 @@ class RetrievalHit(BaseModel):
     chunk_id: UUID
     score: float
     text: str
+    source_file_id: UUID
 
 
 class ChatRequest(BaseModel):
@@ -71,6 +72,42 @@ class DebugPipelineResponse(BaseModel):
     stages: List[PipelineStageDiagnostics]
 
 
+class SessionContext(BaseModel):
+    """Represents ephemeral chat session state."""
+
+    session_id: UUID = Field(default_factory=uuid4)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_interaction_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: datetime = Field(default_factory=lambda: datetime.utcnow() + timedelta(hours=24))
+    active_file_ids: List[UUID] = Field(default_factory=list)
+
+    @classmethod
+    def new(
+        cls,
+        *,
+        session_id: UUID | None = None,
+        ttl_hours: int = 24,
+        active_file_ids: List[UUID] | None = None,
+    ) -> "SessionContext":
+        created = datetime.utcnow()
+        return cls(
+            session_id=session_id or uuid4(),
+            created_at=created,
+            last_interaction_at=created,
+            expires_at=created + timedelta(hours=ttl_hours),
+            active_file_ids=list(active_file_ids or []),
+        )
+
+    def touch(self) -> None:
+        """Refresh the last interaction timestamp."""
+
+        self.last_interaction_at = datetime.utcnow()
+
+    def has_expired(self, reference: datetime | None = None) -> bool:
+        reference = reference or datetime.utcnow()
+        return reference >= self.expires_at
+
+
 __all__ = [
     "Chunk",
     "EmbedVector",
@@ -80,4 +117,5 @@ __all__ = [
     "PipelineStageDiagnostics",
     "DebugPipelineRequest",
     "DebugPipelineResponse",
+    "SessionContext",
 ]

@@ -1,10 +1,19 @@
-"""Models for ingestion endpoints."""
+"""Models for ingestion endpoints and persistence."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from enum import Enum
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
+
+
+class FileKind(str, Enum):
+    """Supported upload categories."""
+
+    PDF = "pdf"
+    AUDIO = "audio"
 
 
 class FileMetadata(BaseModel):
@@ -15,7 +24,24 @@ class FileMetadata(BaseModel):
     content_type: str
     size_bytes: int
     uploaded_at: datetime = Field(default_factory=datetime.utcnow)
-    kind: str
+    expires_at: datetime = Field(default_factory=lambda: datetime.utcnow() + timedelta(hours=24))
+    kind: FileKind
+
+    def has_expired(self, reference: datetime | None = None) -> bool:
+        """Return True if the metadata has expired relative to ``reference``."""
+
+        reference = reference or datetime.utcnow()
+        return reference >= self.expires_at
+
+
+class FileRecord(BaseModel):
+    """Materialized record that combines metadata with filesystem location."""
+
+    metadata: FileMetadata
+    path: Path
+
+    def has_expired(self, reference: datetime | None = None) -> bool:
+        return self.metadata.has_expired(reference)
 
 
 class UploadResponse(BaseModel):
@@ -23,9 +49,10 @@ class UploadResponse(BaseModel):
 
     file_id: UUID
     filename: str
-    kind: str
+    kind: FileKind
     page_count: int | None = None
     duration_seconds: float | None = None
+    expires_at: datetime
 
 
 class ExtractionResult(BaseModel):
@@ -43,7 +70,9 @@ class TranscriptionResult(BaseModel):
 
 
 __all__ = [
+    "FileKind",
     "FileMetadata",
+    "FileRecord",
     "UploadResponse",
     "ExtractionResult",
     "TranscriptionResult",
