@@ -13,6 +13,10 @@ from app.backend.services.pipeline import PipelineService
 from app.backend.services.session_store import SessionStore
 from app.backend.services.storage import FileStorage
 
+PDF_MIME_TYPES = {"application/pdf", "application/x-pdf"}
+AUDIO_MIME_TYPES = {"audio/mpeg", "audio/mp3", "audio/mpeg3"}
+
+
 router = APIRouter()
 
 
@@ -40,16 +44,36 @@ async def health(settings: Settings = Depends(get_app_settings)) -> dict:
     return {"status": "ok", "provider": settings.llm_provider.title(), "vector_db": "ChromaDB"}
 
 
+def _is_pdf_upload(file: UploadFile) -> bool:
+    content_type = (file.content_type or "").lower()
+    if content_type in PDF_MIME_TYPES:
+        return True
+    filename = (file.filename or "").lower()
+    return filename.endswith(".pdf")
+
+
+def _is_mp3_upload(file: UploadFile) -> bool:
+    content_type = (file.content_type or "").lower()
+    if content_type in AUDIO_MIME_TYPES:
+        return True
+    filename = (file.filename or "").lower()
+    return filename.endswith(".mp3")
+
+
 @router.post("/upload/pdf", response_model=UploadResponse)
 async def upload_pdf(
     file: UploadFile = File(...),
     pipeline: PipelineService = Depends(get_pipeline),
     storage: FileStorage = Depends(get_storage),
 ) -> UploadResponse:
-    if file.content_type not in {"application/pdf", "application/x-pdf"}:
+    if not _is_pdf_upload(file):
         raise exceptions.invalid_file_type()
     metadata = await storage.save_upload(file, FileKind.PDF)
-    extraction = await pipeline.handle_pdf_upload(metadata.file_id)
+    try:
+        extraction = await pipeline.handle_pdf_upload(metadata.file_id)
+    except Exception:
+        storage.purge(metadata.file_id)
+        raise
     return UploadResponse(
         file_id=metadata.file_id,
         filename=metadata.filename,
@@ -65,10 +89,14 @@ async def upload_audio(
     pipeline: PipelineService = Depends(get_pipeline),
     storage: FileStorage = Depends(get_storage),
 ) -> UploadResponse:
-    if file.content_type not in {"audio/mpeg", "audio/mp3", "audio/mpeg3"}:
+    if not _is_mp3_upload(file):
         raise exceptions.invalid_file_type()
     metadata = await storage.save_upload(file, FileKind.AUDIO)
-    transcription = await pipeline.handle_audio_upload(metadata.file_id)
+    try:
+        transcription = await pipeline.handle_audio_upload(metadata.file_id)
+    except Exception:
+        storage.purge(metadata.file_id)
+        raise
     return UploadResponse(
         file_id=metadata.file_id,
         filename=metadata.filename,

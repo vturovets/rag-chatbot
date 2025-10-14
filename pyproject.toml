@@ -10,6 +10,8 @@ dependencies = [
     "python-multipart",
     "pdfplumber",
     "mutagen",
+    "pymupdf",
+    "openai>=1.12.0",
     "requests",
     "streamlit",
 ]

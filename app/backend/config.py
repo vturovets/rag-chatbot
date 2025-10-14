@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     transcription_timeout_s: float = Field(8.0, gt=0, description="Timeout for transcription stage")
     generation_timeout_s: float = Field(6.0, gt=0, description="Timeout for generation stage")
 
+    transcription_max_retries: int = Field(3, ge=1, description="Retry attempts for transcription API")
+    transcription_retry_backoff_s: float = Field(1.0, gt=0, description="Initial backoff for retries")
+    whisper_model: str = Field("whisper-large-v3", description="Whisper model identifier")
+
+    openai_api_key: str | None = Field(default=None, description="API key for OpenAI services")
+    openai_api_base: str | None = Field(default=None, description="Optional override for OpenAI API base URL")
+
     class Config:
         env_prefix = "RAG_"
         env_file = ".env"
