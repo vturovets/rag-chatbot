@@ -38,6 +38,10 @@ def unauthorized_debug(message: str = "Debug endpoints are only available in dev
     return RagError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="UNAUTHORIZED_DEBUG", message=message)
 
 
+def invalid_debug_stage(message: str = "Unsupported debug stage requested.") -> RagError:
+    return RagError(status_code=status.HTTP_400_BAD_REQUEST, error_code="INVALID_DEBUG_STAGE", message=message)
+
+
 def file_not_found(message: str = "Referenced file not found or expired.") -> RagError:
     return RagError(status_code=status.HTTP_404_NOT_FOUND, error_code="FILE_NOT_FOUND", message=message)
 
@@ -91,6 +95,7 @@ __all__ = [
     "audio_too_long",
     "missing_query",
     "unauthorized_debug",
+    "invalid_debug_stage",
     "file_not_found",
     "timeout_stage",
     "embedding_error",

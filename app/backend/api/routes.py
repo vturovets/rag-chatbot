@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 
 from app.backend import exceptions
 from app.backend.config import Settings, get_settings
 from app.backend.models.chat import ChatRequest, ChatResponse, DebugPipelineRequest, DebugPipelineResponse
 from app.backend.models.ingestion import FileKind, UploadResponse
+from app.backend.models.status import HealthLimits, HealthResponse
 from app.backend.services.pipeline import PipelineService
 from app.backend.services.session_store import SessionStore
 from app.backend.services.storage import FileStorage
@@ -39,9 +40,38 @@ def get_app_settings() -> Settings:
     return get_settings()
 
 
-@router.get("/health", response_model=dict)
-async def health(settings: Settings = Depends(get_app_settings)) -> dict:
-    return {"status": "ok", "provider": settings.llm_provider.title(), "vector_db": "ChromaDB"}
+def _format_provider_name(identifier: str) -> str:
+    mapping = {"openai": "OpenAI", "google": "Google"}
+    return mapping.get(identifier.lower(), identifier)
+
+
+@router.get("/health", response_model=HealthResponse)
+async def health(
+    raw: bool = Query(False, description="Return extended diagnostics when debug mode is enabled."),
+    settings: Settings = Depends(get_app_settings),
+) -> HealthResponse:
+    if raw and not settings.debug_mode:
+        raise exceptions.unauthorized_debug()
+
+    limits: HealthLimits | None = None
+    if raw:
+        limits = HealthLimits(
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+            top_k=settings.top_k,
+            max_upload_mb=settings.max_upload_mb,
+            max_pdf_pages=settings.max_pdf_pages,
+            max_audio_minutes=settings.max_audio_minutes,
+        )
+
+    return HealthResponse(
+        status="ok",
+        provider=_format_provider_name(settings.llm_provider),
+        vector_db="ChromaDB",
+        environment=settings.environment,
+        debug_mode=settings.debug_mode,
+        limits=limits,
+    )
 
 
 def _is_pdf_upload(file: UploadFile) -> bool:
@@ -114,12 +144,14 @@ async def chat(request: ChatRequest, pipeline: PipelineService = Depends(get_pip
 @router.post("/debug/pipeline", response_model=DebugPipelineResponse)
 async def debug_pipeline(
     request: DebugPipelineRequest,
+    break_at: str = Query("generate", description="Stage at which to stop the pipeline."),
+    raw: bool = Query(False, description="Return raw payloads for each stage when debug mode is enabled."),
     pipeline: PipelineService = Depends(get_pipeline),
     settings: Settings = Depends(get_app_settings),
 ) -> DebugPipelineResponse:
     if not settings.debug_mode:
         raise exceptions.unauthorized_debug()
-    return await pipeline.debug_pipeline(request.file_id, request.break_at, request.raw)
+    return await pipeline.debug_pipeline(request.file_id, break_at, raw)
 
 
 __all__ = ["router"]

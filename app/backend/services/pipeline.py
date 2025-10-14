@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import asdict
 from typing import List, Sequence
@@ -14,6 +15,7 @@ from app.backend.models.chat import (
     ChatResponse,
     Chunk,
     DebugPipelineResponse,
+    EmbedVector,
     PipelineStageDiagnostics,
     RetrievalHit,
 )
@@ -179,78 +181,211 @@ class PipelineService:
         except GenerationError as exc:
             raise exceptions.internal_error() from exc
 
+    @staticmethod
+    def _preview_text(text: str, limit: int = 240) -> str:
+        cleaned = " ".join(text.strip().split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return f"{cleaned[:limit].rstrip()}..."
+
+    def _build_probe_query(self, chunks: List[NormalizedChunk], fallback_text: str) -> str:
+        if chunks:
+            probe = chunks[0].text.strip()
+            if probe:
+                return probe[:200]
+        cleaned = " ".join(fallback_text.strip().split())
+        return cleaned[:120] or "debug pipeline probe"
+
+    def _rank_hits(
+        self,
+        query_vector: Sequence[float],
+        vectors: Sequence[EmbedVector],
+        chunks: Sequence[Chunk],
+        *,
+        top_k: int,
+    ) -> List[RetrievalHit]:
+        if not query_vector or not vectors:
+            return []
+        chunk_lookup = {chunk.chunk_id: chunk for chunk in chunks}
+        scored: List[tuple[float, Chunk]] = []
+        for vector in vectors:
+            chunk = chunk_lookup.get(vector.chunk_id)
+            if chunk is None:
+                continue
+            score = self._cosine_similarity(query_vector, vector.values)
+            scored.append((score, chunk))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        hits: List[RetrievalHit] = []
+        for score, chunk in scored[: max(1, top_k)]:
+            hits.append(
+                RetrievalHit(
+                    chunk_id=chunk.chunk_id,
+                    score=score,
+                    text=chunk.text,
+                    source_file_id=chunk.source_file_id,
+                )
+            )
+        return hits
+
+    @staticmethod
+    def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
+        if not left or not right:
+            return 0.0
+        dot = sum(l * r for l, r in zip(left, right))
+        left_norm = math.sqrt(sum(l * l for l in left)) or 1.0
+        right_norm = math.sqrt(sum(r * r for r in right)) or 1.0
+        return dot / (left_norm * right_norm)
+
     async def debug_pipeline(self, file_id: UUID, break_at: str, raw: bool) -> DebugPipelineResponse:
+        allowed_stages = ["extract", "chunk", "embed", "retrieve", "generate"]
+        target_stage = break_at.strip().lower()
+        if target_stage not in allowed_stages:
+            raise exceptions.invalid_debug_stage()
+
         stages: List[PipelineStageDiagnostics] = []
         metadata = self._storage.get_metadata(file_id)
 
         if metadata.kind == FileKind.PDF:
             extraction = await self._extraction.extract_pdf(file_id)
-            extraction_text = extraction.text
+            extracted_text = extraction.text
+            extract_output = extraction.model_dump()
+            if not raw:
+                extract_output = {
+                    "pages": extraction.pages,
+                    "text": self._preview_text(extraction.text),
+                }
+            extract_input: dict[str, object] = {
+                "file_id": str(file_id),
+                "file_type": metadata.kind.value,
+            }
         else:
-            extraction = await self._extraction.transcribe_audio(file_id)
-            extraction_text = extraction.transcript
+            transcription = await self._extraction.transcribe_audio(file_id)
+            extracted_text = transcription.transcript
+            extract_output = transcription.model_dump()
+            if not raw:
+                extract_output = {
+                    "duration_seconds": transcription.duration_seconds,
+                    "transcript": self._preview_text(transcription.transcript),
+                }
+            extract_input = {
+                "file_id": str(file_id),
+                "file_type": metadata.kind.value,
+                "language": "en",
+            }
+        if raw:
+            extract_input["filename"] = metadata.filename
         stages.append(
-            PipelineStageDiagnostics(
-                stage="extract",
-                input_payload={"file_id": str(file_id), "file_type": metadata.kind.value},
-                output_payload=extraction.model_dump(),
-            )
+            PipelineStageDiagnostics(stage="extract", input_payload=extract_input, output_payload=extract_output)
         )
-        if break_at == "extract":
+        if target_stage == "extract":
             return DebugPipelineResponse(stages=stages)
 
-        chunks, normalized_chunks = self._chunk_text(extraction_text, file_id)
-        chunk_stats = {
-            "count": len(normalized_chunks),
-            "total_tokens": sum(item.token_count for item in normalized_chunks),
+        chunks, normalized_chunks = self._chunk_text(extracted_text, file_id)
+        total_tokens = sum(item.token_count for item in normalized_chunks)
+        chunk_total = len(normalized_chunks)
+        chunk_counts: dict[str, float | int] = {
+            "chunks": chunk_total,
+            "total_tokens": total_tokens,
         }
-        if chunk_stats["count"]:
-            chunk_stats["avg_tokens"] = chunk_stats["total_tokens"] / chunk_stats["count"]
+        if chunk_total:
+            chunk_counts["avg_tokens"] = total_tokens / chunk_total
+        chunk_sample = chunks if raw else chunks[: min(5, len(chunks))]
+        chunk_items: List[dict[str, object]] = []
+        for chunk in chunk_sample:
+            item: dict[str, object] = {
+                "chunk_id": str(chunk.chunk_id),
+                "order": chunk.order,
+            }
+            item["text" if raw else "preview"] = chunk.text if raw else self._preview_text(chunk.text)
+            chunk_items.append(item)
+        chunk_output: dict[str, object] = {"counts": chunk_counts, "chunks": chunk_items}
+        if raw:
+            chunk_output["token_windows"] = [asdict(item) for item in normalized_chunks]
+        chunk_input: dict[str, object] = {
+            "chunk_size": self._settings.chunk_size,
+            "overlap": self._settings.chunk_overlap,
+        }
+        if raw:
+            chunk_input["text"] = extracted_text
+        else:
+            chunk_input["text_preview"] = self._preview_text(extracted_text)
         stages.append(
-            PipelineStageDiagnostics(
-                stage="chunk",
-                input_payload={"chunk_size": self._settings.chunk_size, "overlap": self._settings.chunk_overlap},
-                output_payload=
-                chunk_stats
-                if not raw
-                else {
-                    "chunks": [chunk.model_dump() for chunk in chunks],
-                    "token_windows": [asdict(item) for item in normalized_chunks],
-                },
-            )
+            PipelineStageDiagnostics(stage="chunk", input_payload=chunk_input, output_payload=chunk_output)
         )
-        if break_at == "chunk":
+        if target_stage == "chunk":
             return DebugPipelineResponse(stages=stages)
 
         vectors = self._embeddings.embed_chunks(chunks)
+        fingerprint = self._embeddings.index_fingerprint()
+        embed_input = {
+            "chunks": [
+                {
+                    "chunk_id": str(chunk.chunk_id),
+                    "order": chunk.order,
+                }
+                for chunk in chunk_sample
+            ]
+        }
+        embed_output: dict[str, object] = {
+            "vectors": {
+                "count": len(vectors),
+                "dim": len(vectors[0].values) if vectors else 0,
+            },
+            "index_fingerprint": fingerprint,
+        }
+        if raw:
+            embed_output["vectors"] = {
+                "count": len(vectors),
+                "dim": len(vectors[0].values) if vectors else 0,
+                "items": [
+                    {"chunk_id": str(vector.chunk_id), "values": vector.values}
+                    for vector in vectors
+                ],
+            }
+            embed_output["index_fingerprint"] = fingerprint
         stages.append(
-            PipelineStageDiagnostics(
-                stage="embed",
-                input_payload={"fingerprint": self._embeddings.index_fingerprint()},
-                output_payload={"count": len(vectors), "dimension": len(vectors[0].values) if vectors else 0},
-            )
+            PipelineStageDiagnostics(stage="embed", input_payload=embed_input, output_payload=embed_output)
         )
-        if break_at == "embed":
+        if target_stage == "embed":
             return DebugPipelineResponse(stages=stages)
 
-        self._vector_store.upsert(chunks)
-        hits = self._vector_store.similarity_search("debug", self._settings.top_k)
+        probe_query = self._build_probe_query(normalized_chunks, extracted_text)
+        top_k = max(1, min(self._settings.top_k, 8))
+        query_vector = self._embeddings.embed_query(probe_query)
+        hits = self._rank_hits(query_vector, vectors, chunks, top_k=top_k)
+        retrieve_input = {"query": probe_query, "top_k": top_k}
+        retrieve_hits: List[dict[str, object]] = []
+        for hit in hits:
+            entry: dict[str, object] = {
+                "chunk_id": str(hit.chunk_id),
+                "score": round(hit.score, 6),
+                "source_file_id": str(hit.source_file_id),
+            }
+            entry["text" if raw else "preview"] = hit.text if raw else self._preview_text(hit.text)
+            retrieve_hits.append(entry)
+        retrieve_output = {"hits": retrieve_hits, "count": len(retrieve_hits)}
         stages.append(
-            PipelineStageDiagnostics(
-                stage="retrieve",
-                input_payload={"query": "debug", "top_k": self._settings.top_k},
-                output_payload={"count": len(hits)} if not raw else {"hits": [hit.model_dump() for hit in hits]},
-            )
+            PipelineStageDiagnostics(stage="retrieve", input_payload=retrieve_input, output_payload=retrieve_output)
         )
-        if break_at == "retrieve":
+        if target_stage == "retrieve":
             return DebugPipelineResponse(stages=stages)
 
-        answer = self._generate_answer(hits)
+        prompt = await self._build_prompt_with_timeout(probe_query, hits)
+        context = [hit.text for hit in hits]
+        answer = await self._generate_with_guard(prompt=prompt, query=probe_query, context=context)
+        generate_input = {
+            "query": probe_query,
+            "context_ids": [str(hit.chunk_id) for hit in hits],
+        }
+        generate_output: dict[str, object] = {
+            "prompt": prompt if raw else self._preview_text(prompt, limit=320),
+            "answer": answer,
+        }
+        if raw:
+            generate_output["context"] = context
         stages.append(
             PipelineStageDiagnostics(
-                stage="generate",
-                input_payload={"query": "debug"},
-                output_payload={"answer": answer},
+                stage="generate", input_payload=generate_input, output_payload=generate_output
             )
         )
         return DebugPipelineResponse(stages=stages)
