@@ -50,10 +50,13 @@ except Exception:  # pragma: no cover - fallback for pydantic>=2.12 where BaseSe
             super().__init__(**combined)
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ENV_FILE = PROJECT_ROOT / ".env"
+
 if ConfigDict is not None:
     SETTINGS_MODEL_CONFIG = ConfigDict(
         env_prefix="RAG_",
-        env_file=".env",
+        env_file=str(ENV_FILE),
         env_file_encoding="utf-8",
     )
 else:  # pragma: no cover - compatibility with older pydantic versions
@@ -96,7 +99,7 @@ class Settings(BaseSettings):
     google_api_key: str | None = Field(default=None, description="API key for Google Generative AI")
 
     env_prefix: ClassVar[str] = "RAG_"
-    env_file: ClassVar[str | None] = ".env"
+    env_file: ClassVar[str | None] = str(ENV_FILE)
     env_file_encoding: ClassVar[str] = "utf-8"
 
     if SETTINGS_MODEL_CONFIG is not None:
@@ -104,7 +107,7 @@ class Settings(BaseSettings):
     else:  # pragma: no cover - compatibility with pydantic<2
         class Config:
             env_prefix = "RAG_"
-            env_file = ".env"
+            env_file = str(ENV_FILE)
             env_file_encoding = "utf-8"
 
     @validator("storage_dir", pre=True)
