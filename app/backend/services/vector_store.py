@@ -18,7 +18,7 @@ except ModuleNotFoundError:  # pragma: no cover - executed when chromadb is miss
     ChromaSettings = None  # type: ignore[assignment]
 
 from app.backend.config import get_settings
-from app.backend.models.chat import Chunk, RetrievalHit
+from app.backend.models.chat import Chunk, EmbedVector, RetrievalHit
 from app.backend.services.embeddings import EmbeddingService
 
 
@@ -111,16 +111,24 @@ class VectorStore:
             return
 
         vectors = self._embedding_service.embed_chunks(chunk_list)
-        if not vectors:
+        self.upsert_vectors(chunk_list, vectors)
+
+    def upsert_vectors(self, chunks: Iterable[Chunk], vectors: Iterable[EmbedVector]) -> None:
+        chunk_list = [chunk for chunk in chunks if chunk.text.strip()]
+        vector_list = list(vectors)
+        if not chunk_list or not vector_list:
             return
 
-        dimension = len(vectors[0].values)
-        if any(len(vector.values) != dimension for vector in vectors):
+        if len(vector_list) != len(chunk_list):
+            raise ValueError("Embedding vectors have inconsistent counts")
+
+        dimension = len(vector_list[0].values)
+        if any(len(vector.values) != dimension for vector in vector_list):
             raise ValueError("Embedding vectors have inconsistent dimensions")
 
         fingerprint = self._embedding_service.index_fingerprint()
         if self._use_in_memory:
-            self._upsert_in_memory(fingerprint, chunk_list, vectors, dimension)
+            self._upsert_in_memory(fingerprint, chunk_list, vector_list, dimension)
             return
 
         collection = self._get_collection(fingerprint, dimension)
@@ -131,7 +139,7 @@ class VectorStore:
             {"chunk_id": str(chunk.chunk_id), "source_file_id": str(chunk.source_file_id), "order": chunk.order}
             for chunk in chunk_list
         ]
-        embeddings = [vector.values for vector in vectors]
+        embeddings = [vector.values for vector in vector_list]
 
         with self._lock:
             collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import time
 from dataclasses import asdict
@@ -20,7 +21,11 @@ from app.backend.models.chat import (
     RetrievalHit,
 )
 from app.backend.models.ingestion import ExtractionResult, FileKind, TranscriptionResult
-from app.backend.services.embeddings import EmbeddingService
+from app.backend.services.embeddings import (
+    EmbeddingOperationError,
+    EmbeddingRateLimitError,
+    EmbeddingService,
+)
 from app.backend.services.extraction import ExtractionService
 from app.backend.services.generation import (
     GenerationError,
@@ -33,6 +38,10 @@ from app.backend.services.session_store import SessionStore
 from app.backend.services.storage import FileStorage
 from app.backend.services.vector_store import VectorStore
 from app.common.chunking import ChunkConfig, NormalizedChunk, chunk_text
+from app.common.logging import json_log
+
+
+logger = logging.getLogger(__name__)
 
 
 class PipelineService:
@@ -56,22 +65,70 @@ class PipelineService:
         self._generation = generation or GenerationService()
 
     async def handle_pdf_upload(self, file_id: UUID) -> ExtractionResult:
+        overall_start = time.perf_counter()
+        extraction_start = time.perf_counter()
         extraction = await self._extraction.extract_pdf(file_id)
-        self._index_extracted_text(extraction, file_id)
+        extraction_ms = int((time.perf_counter() - extraction_start) * 1000)
+        indexing = self._index_extracted_text(extraction, file_id)
+        total_ms = int((time.perf_counter() - overall_start) * 1000)
+        json_log(
+            logger,
+            logging.INFO,
+            "ingestion.complete",
+            ingestion_type="pdf",
+            file_id=str(file_id),
+            counts={
+                "chunks": indexing["chunk_count"],
+                "embeddings": indexing["embedding_count"],
+                "tokens_total": indexing["token_total"],
+                "tokens_avg": round(indexing["token_avg"], 2),
+            },
+            timings={
+                "extraction_ms": extraction_ms,
+                "chunk_ms": indexing["chunk_ms"],
+                "embedding_ms": indexing["embedding_ms"],
+                "vector_store_ms": indexing["vector_store_ms"],
+                "total_ms": total_ms,
+            },
+            file_stats={"pages": extraction.pages},
+        )
         return extraction
 
     async def handle_audio_upload(self, file_id: UUID) -> TranscriptionResult:
+        overall_start = time.perf_counter()
+        transcription_start = time.perf_counter()
         transcription = await self._extraction.transcribe_audio(file_id)
-        self._index_transcript(transcription, file_id)
+        transcription_ms = int((time.perf_counter() - transcription_start) * 1000)
+        indexing = self._index_transcript(transcription, file_id)
+        total_ms = int((time.perf_counter() - overall_start) * 1000)
+        json_log(
+            logger,
+            logging.INFO,
+            "ingestion.complete",
+            ingestion_type="audio",
+            file_id=str(file_id),
+            counts={
+                "chunks": indexing["chunk_count"],
+                "embeddings": indexing["embedding_count"],
+                "tokens_total": indexing["token_total"],
+                "tokens_avg": round(indexing["token_avg"], 2),
+            },
+            timings={
+                "transcription_ms": transcription_ms,
+                "chunk_ms": indexing["chunk_ms"],
+                "embedding_ms": indexing["embedding_ms"],
+                "vector_store_ms": indexing["vector_store_ms"],
+                "total_ms": total_ms,
+            },
+            file_stats={"duration_seconds": round(transcription.duration_seconds, 2)},
+        )
         return transcription
 
-    def _index_extracted_text(self, extraction: ExtractionResult, file_id: UUID) -> None:
-        chunks, _ = self._chunk_text(extraction.text, file_id)
-        self._vector_store.upsert(chunks)
+    def _index_extracted_text(self, extraction: ExtractionResult, file_id: UUID) -> dict[str, float | int]:
+        return self._index_text(extraction.text, file_id)
 
-    def _index_transcript(self, transcription: TranscriptionResult, file_id: UUID) -> None:
-        chunks, _ = self._chunk_text(transcription.transcript, file_id)
-        self._vector_store.upsert(chunks)
+    def _index_transcript(self, transcription: TranscriptionResult, file_id: UUID) -> dict[str, float | int]:
+        return self._index_text(transcription.transcript, file_id)
 
     def _chunk_text(self, text: str, file_id: UUID) -> tuple[List[Chunk], List[NormalizedChunk]]:
         config = ChunkConfig(chunk_size=self._settings.chunk_size, chunk_overlap=self._settings.chunk_overlap)
@@ -82,6 +139,39 @@ class PipelineService:
         ]
         return chunks, normalized
 
+    def _index_text(self, text: str, file_id: UUID) -> dict[str, float | int]:
+        chunk_start = time.perf_counter()
+        chunks, normalized = self._chunk_text(text, file_id)
+        chunk_ms = int((time.perf_counter() - chunk_start) * 1000)
+
+        try:
+            embed_start = time.perf_counter()
+            vectors = self._embeddings.embed_chunks(chunks)
+            embedding_ms = int((time.perf_counter() - embed_start) * 1000)
+        except EmbeddingRateLimitError as exc:
+            raise exceptions.rate_limit_exceeded() from exc
+        except EmbeddingOperationError as exc:
+            raise exceptions.embedding_error() from exc
+
+        upsert_start = time.perf_counter()
+        self._vector_store.upsert_vectors(chunks, vectors)
+        vector_store_ms = int((time.perf_counter() - upsert_start) * 1000)
+
+        chunk_count = len(chunks)
+        embedding_count = len(vectors)
+        token_total = sum(item.token_count for item in normalized)
+        avg_tokens = (token_total / chunk_count) if chunk_count else 0.0
+
+        return {
+            "chunk_ms": chunk_ms,
+            "embedding_ms": embedding_ms,
+            "vector_store_ms": vector_store_ms,
+            "chunk_count": chunk_count,
+            "embedding_count": embedding_count,
+            "token_total": token_total,
+            "token_avg": avg_tokens,
+        }
+
     async def chat(self, request: ChatRequest) -> ChatResponse:
         if not request.query.strip():
             raise exceptions.missing_query()
@@ -91,23 +181,47 @@ class PipelineService:
         top_k = max(1, min(requested_top_k, 8))
         start = time.perf_counter()
 
+        retrieve_start = time.perf_counter()
         hits = await self._retrieve_with_timeout(
             request.query,
             top_k,
             allowed_source_ids=context.active_file_ids,
         )
+        retrieval_ms = int((time.perf_counter() - retrieve_start) * 1000)
 
         self._sessions.associate_files(session_id, [hit.source_file_id for hit in hits])
 
+        prompt_start = time.perf_counter()
         prompt = await self._build_prompt_with_timeout(request.query, hits)
+        prompt_ms = int((time.perf_counter() - prompt_start) * 1000)
 
+        generate_start = time.perf_counter()
         answer = await self._generate_with_guard(
             prompt=prompt,
             query=request.query,
             context=[hit.text for hit in hits],
         )
+        generation_ms = int((time.perf_counter() - generate_start) * 1000)
 
         latency_ms = int((time.perf_counter() - start) * 1000)
+        json_log(
+            logger,
+            logging.INFO,
+            "chat.completed",
+            session_id=str(session_id),
+            query_preview=self._preview_text(request.query, limit=120),
+            retrieval={
+                "requested_top_k": top_k,
+                "returned": len(hits),
+                "precision_at_k": self._precision_sample(hits, top_k),
+            },
+            latency_breakdown={
+                "total_ms": latency_ms,
+                "retrieve_ms": retrieval_ms,
+                "prompt_ms": prompt_ms,
+                "generate_ms": generation_ms,
+            },
+        )
         return ChatResponse(answer=answer, latency_ms=latency_ms, session_id=session_id)
 
     async def _retrieve_with_timeout(
@@ -131,6 +245,10 @@ class PipelineService:
             return await asyncio.wait_for(
                 asyncio.to_thread(_search), timeout=self._settings.retrieval_timeout_s
             )
+        except EmbeddingRateLimitError as exc:
+            raise exceptions.rate_limit_exceeded() from exc
+        except EmbeddingOperationError as exc:
+            raise exceptions.embedding_error() from exc
         except asyncio.TimeoutError as exc:
             raise exceptions.timeout_stage("Processing timed out while retrieving context.") from exc
         except Exception as exc:
@@ -187,6 +305,23 @@ class PipelineService:
         if len(cleaned) <= limit:
             return cleaned
         return f"{cleaned[:limit].rstrip()}..."
+
+    @staticmethod
+    def _precision_sample(hits: Sequence[RetrievalHit], top_k: int) -> dict[str, object]:
+        if not hits:
+            return {"top_k": top_k, "estimated": 0.0, "threshold": 0.6, "scores": [], "sampled": 0}
+        threshold = 0.6
+        sample = hits[: max(1, min(top_k, len(hits)))]
+        relevant = sum(1 for hit in sample if hit.score >= threshold)
+        estimated = relevant / len(sample)
+        return {
+            "top_k": top_k,
+            "threshold": threshold,
+            "estimated": round(estimated, 3),
+            "scores": [round(hit.score, 4) for hit in sample],
+            "chunk_ids": [str(hit.chunk_id) for hit in sample],
+            "sampled": len(sample),
+        }
 
     def _build_probe_query(self, chunks: List[NormalizedChunk], fallback_text: str) -> str:
         if chunks:

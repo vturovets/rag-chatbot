@@ -1,10 +1,32 @@
 """Embedding generation services supporting multiple providers."""
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 import hashlib
 import math
 from typing import Iterable, List, Protocol
+
+try:  # pragma: no cover - optional dependency import guards
+    from openai import (  # type: ignore import for optional dependency
+        APIConnectionError,
+        APIError,
+        APIStatusError,
+        APITimeoutError,
+        OpenAI,
+        OpenAIError,
+        RateLimitError,
+    )
+except Exception:  # pragma: no cover - guard when openai not installed
+    APIConnectionError = APIError = APIStatusError = APITimeoutError = OpenAIError = RateLimitError = None  # type: ignore
+    OpenAI = None  # type: ignore
+
+try:  # pragma: no cover - optional dependency import guards
+    import google.generativeai as genai  # type: ignore
+    from google.api_core import exceptions as google_exceptions  # type: ignore
+except Exception:  # pragma: no cover - guard when google generative AI not installed
+    genai = None  # type: ignore
+    google_exceptions = None  # type: ignore
 
 from app.backend.config import get_settings
 from app.backend.models.chat import Chunk, EmbedVector
@@ -34,6 +56,14 @@ class EmbeddingProvider(Protocol):
 
 class ProviderConfigurationError(RuntimeError):
     """Raised when a provider cannot be initialised due to configuration issues."""
+
+
+class EmbeddingOperationError(RuntimeError):
+    """Raised when embeddings cannot be generated."""
+
+
+class EmbeddingRateLimitError(EmbeddingOperationError):
+    """Raised when the embedding provider signals rate limiting."""
 
 
 def _hash_to_unit_vector(text: str, dim: int = 1536) -> List[float]:
@@ -66,10 +96,10 @@ class OpenAIEmbeddingProvider:
     """Embedding provider backed by OpenAI's embeddings API."""
 
     def __init__(self, model_name: str, api_key: str | None, api_base: str | None) -> None:
+        if OpenAI is None:
+            raise ProviderConfigurationError("openai package is not available")
         if not api_key:
             raise ProviderConfigurationError("OpenAI API key is not configured")
-        from openai import OpenAI
-
         client_kwargs = {"api_key": api_key}
         if api_base:
             client_kwargs["base_url"] = api_base
@@ -95,17 +125,34 @@ class OpenAIEmbeddingProvider:
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
-        response = self._client.embeddings.create(model=self._model_name, input=texts)
-        vectors: List[List[float]] = []
-        for text, item in zip(texts, response.data):
-            vector = list(item.embedding)
-            if not vector:
-                base_dimension = self._dimension or 1536
-                vector = _hash_to_unit_vector(text, base_dimension)
-            vectors.append(vector)
-        if vectors:
-            self._dimension = len(vectors[0])
-        return vectors
+        delay = 0.5
+        attempts = 4
+        last_exception: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self._client.embeddings.create(model=self._model_name, input=texts)
+                vectors: List[List[float]] = []
+                for text, item in zip(texts, response.data):
+                    vector = list(item.embedding)
+                    if not vector:
+                        base_dimension = self._dimension or 1536
+                        vector = _hash_to_unit_vector(text, base_dimension)
+                    vectors.append(vector)
+                if vectors:
+                    self._dimension = len(vectors[0])
+                return vectors
+            except RateLimitError as exc:  # type: ignore[arg-type]
+                last_exception = exc
+                if attempt == attempts:
+                    raise EmbeddingRateLimitError("OpenAI rate limit exceeded") from exc
+                time.sleep(delay)
+            except (APIStatusError, APIError, APIConnectionError, APITimeoutError, OpenAIError) as exc:  # type: ignore[arg-type]
+                last_exception = exc
+                if attempt == attempts:
+                    raise EmbeddingOperationError("OpenAI embedding failed") from exc
+                time.sleep(delay)
+            delay *= 2
+        raise EmbeddingOperationError("OpenAI embedding failed") from last_exception
 
     def embed_query(self, text: str) -> List[float]:
         vector = self.embed_documents([text])
@@ -118,11 +165,8 @@ class GoogleAIVectorProvider:
     def __init__(self, model_name: str, api_key: str | None) -> None:
         if not api_key:
             raise ProviderConfigurationError("Google API key is not configured")
-        try:
-            import google.generativeai as genai
-        except ModuleNotFoundError as exc:  # pragma: no cover - import guard
-            raise ProviderConfigurationError("google-generativeai package is required") from exc
-
+        if genai is None:
+            raise ProviderConfigurationError("google-generativeai package is required")
         genai.configure(api_key=api_key)
         self._model_name = model_name
         self._dimension: int | None = None
@@ -142,28 +186,52 @@ class GoogleAIVectorProvider:
             return 768
         return self._dimension
 
+    def _embed_with_retry(self, text: str) -> List[float]:
+        attempts = 4
+        delay = 0.5
+        last_exception: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self._client.embed_content(model=self._model_name, content=text)
+                vector = response.get("embedding", [])
+                if not vector:
+                    base_dimension = self._dimension or 768
+                    vector = _hash_to_unit_vector(text, base_dimension)
+                if vector and self._dimension is None:
+                    self._dimension = len(vector)
+                return vector
+            except Exception as exc:  # pragma: no cover - provider specific exceptions
+                last_exception = exc
+                if google_exceptions and isinstance(exc, google_exceptions.ResourceExhausted):
+                    if attempt == attempts:
+                        raise EmbeddingRateLimitError("Google Generative AI rate limit exceeded") from exc
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                if google_exceptions and isinstance(
+                    exc,
+                    (
+                        google_exceptions.ServiceUnavailable,
+                        google_exceptions.InternalServerError,
+                        google_exceptions.DeadlineExceeded,
+                    ),
+                ):
+                    if attempt == attempts:
+                        raise EmbeddingOperationError("Google Generative AI embedding failed") from exc
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise EmbeddingOperationError("Google Generative AI embedding failed") from exc
+        raise EmbeddingOperationError("Google Generative AI embedding failed") from last_exception
+
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         embeddings: List[List[float]] = []
         for text in texts:
-            response = self._client.embed_content(model=self._model_name, content=text)
-            vector = response.get("embedding", [])
-            if not vector:
-                base_dimension = self._dimension or 768
-                vector = _hash_to_unit_vector(text, base_dimension)
-            embeddings.append(vector)
-            if vector and self._dimension is None:
-                self._dimension = len(vector)
+            embeddings.append(self._embed_with_retry(text))
         return embeddings
 
     def embed_query(self, text: str) -> List[float]:
-        response = self._client.embed_content(model=self._model_name, content=text)
-        vector = response.get("embedding", [])
-        if not vector:
-            base_dimension = self._dimension or 768
-            vector = _hash_to_unit_vector(text, base_dimension)
-        if vector and self._dimension is None:
-            self._dimension = len(vector)
-        return vector
+        return self._embed_with_retry(text)
 
 
 class EmbeddingService:
@@ -197,13 +265,29 @@ class EmbeddingService:
         chunk_list = [chunk for chunk in chunks if chunk.text.strip()]
         if not chunk_list:
             return []
-        vectors = self._provider.embed_documents([chunk.text for chunk in chunk_list])
+        try:
+            vectors = self._provider.embed_documents([chunk.text for chunk in chunk_list])
+        except EmbeddingRateLimitError:
+            raise
+        except Exception as exc:
+            raise EmbeddingOperationError("Failed to embed chunks") from exc
         if len(vectors) != len(chunk_list):
-            raise RuntimeError("Embedding provider returned unexpected number of vectors")
+            raise EmbeddingOperationError("Embedding provider returned unexpected number of vectors")
         return [EmbedVector(chunk_id=chunk.chunk_id, values=vector) for chunk, vector in zip(chunk_list, vectors)]
 
     def embed_query(self, query: str) -> List[float]:
-        return self._provider.embed_query(query)
+        try:
+            return self._provider.embed_query(query)
+        except EmbeddingRateLimitError:
+            raise
+        except Exception as exc:
+            raise EmbeddingOperationError("Failed to embed query") from exc
 
 
-__all__ = ["EmbeddingService", "ProviderConfigurationError", "EmbeddingProvider"]
+__all__ = [
+    "EmbeddingService",
+    "EmbeddingProvider",
+    "EmbeddingOperationError",
+    "EmbeddingRateLimitError",
+    "ProviderConfigurationError",
+]
