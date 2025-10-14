@@ -26,11 +26,14 @@ class Settings(BaseSettings):
     max_audio_minutes: int = Field(60, ge=1, description="Maximum audio duration in minutes")
 
     llm_provider: Literal["openai", "google"] = Field("openai", description="LLM provider selection")
+    llm_model: str = Field("gpt-4o-mini", description="LLM model identifier")
     embedding_model: str = Field("text-embedding-3-large", description="Embedding model name")
 
     extraction_timeout_s: float = Field(5.0, gt=0, description="Timeout for extraction stage")
     transcription_timeout_s: float = Field(8.0, gt=0, description="Timeout for transcription stage")
-    generation_timeout_s: float = Field(6.0, gt=0, description="Timeout for generation stage")
+    retrieval_timeout_s: float = Field(2.5, gt=0, description="Timeout for retrieval stage")
+    prompt_timeout_s: float = Field(0.5, gt=0, description="Timeout for prompt assembly")
+    generation_timeout_s: float = Field(3.0, gt=0, description="Timeout for generation stage")
 
     transcription_max_retries: int = Field(3, ge=1, description="Retry attempts for transcription API")
     transcription_retry_backoff_s: float = Field(1.0, gt=0, description="Initial backoff for retries")
