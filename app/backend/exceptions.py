@@ -1,17 +1,36 @@
-"""Domain-specific exceptions and error mapping."""
+"""Domain-specific exceptions and error payload helpers."""
 from __future__ import annotations
 
+from typing import Dict
+
 from fastapi import HTTPException, status
+
+
+def build_error_payload(error_code: str, message: str, hint: str | None = None) -> Dict[str, str]:
+    """Return a standardized error payload."""
+
+    payload: Dict[str, str] = {"error_code": error_code, "message": message}
+    if hint:
+        payload["hint"] = hint
+    return payload
 
 
 class RagError(HTTPException):
     """Base error with standardized payload."""
 
     def __init__(self, *, status_code: int, error_code: str, message: str, hint: str | None = None) -> None:
-        payload = {"error_code": error_code, "message": message}
-        if hint:
-            payload["hint"] = hint
-        super().__init__(status_code=status_code, detail=payload)
+        self.error_code = error_code
+        self.message = message
+        self.hint = hint
+        super().__init__(
+            status_code=status_code,
+            detail=build_error_payload(error_code=error_code, message=message, hint=hint),
+        )
+
+    def to_payload(self) -> Dict[str, str]:
+        """Return the serialized payload for the error."""
+
+        return build_error_payload(self.error_code, self.message, self.hint)
 
 
 def invalid_file_type(message: str = "Unsupported file format. Please upload a PDF or MP3 file.") -> RagError:
@@ -75,6 +94,32 @@ def internal_error(message: str = "Unexpected server error. Please retry or cont
     return RagError(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, error_code="INTERNAL_ERROR", message=message)
 
 
+def invalid_request(
+    message: str = "The request payload is invalid.",
+    *,
+    hint: str | None = None,
+) -> RagError:
+    return RagError(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        error_code="INVALID_REQUEST",
+        message=message,
+        hint=hint,
+    )
+
+
+def http_error(
+    message: str = "An HTTP error occurred while processing the request.",
+    *,
+    status_code: int = status.HTTP_400_BAD_REQUEST,
+    hint: str | None = None,
+) -> RagError:
+    return RagError(status_code=status_code, error_code="HTTP_ERROR", message=message, hint=hint)
+
+
+def resource_not_found(message: str = "The requested resource was not found.") -> RagError:
+    return RagError(status_code=status.HTTP_404_NOT_FOUND, error_code="RESOURCE_NOT_FOUND", message=message)
+
+
 def llm_provider_down(message: str = "Model provider unavailable. Try again shortly.") -> RagError:
     return RagError(status_code=status.HTTP_502_BAD_GATEWAY, error_code="LLM_PROVIDER_DOWN", message=message)
 
@@ -102,7 +147,11 @@ __all__ = [
     "transcription_error",
     "rate_limit_exceeded",
     "internal_error",
+    "invalid_request",
+    "http_error",
+    "resource_not_found",
     "llm_provider_down",
     "vector_db_unavailable",
     "generation_timeout",
+    "build_error_payload",
 ]
