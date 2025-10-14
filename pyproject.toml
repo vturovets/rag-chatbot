@@ -1,0 +1,27 @@
+[project]
+name = "rag-chatbot"
+version = "0.1.0"
+description = "Retrieval-augmented chatbot with FastAPI backend and Streamlit frontend"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2.6",
+    "python-multipart",
+    "pdfplumber",
+    "mutagen",
+    "requests",
+    "streamlit",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx",
+    "pytest",
+]
+
+[tool.black]
+line-length = 100
+
+[tool.isort]
+profile = "black"
