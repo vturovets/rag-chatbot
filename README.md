@@ -88,6 +88,21 @@ the default `http://localhost:8000`.
 Uploaded files and generated embeddings are stored under `storage/` (configurable through
 `RAG_STORAGE_DIR`). Ensure the directory is writable before starting the backend.
 
+### Audio transcription backends
+
+When no external transcription API key is configured the backend falls back to
+[`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) for local inference. The default
+configuration now forces CPU execution (`RAG_LOCAL_TRANSCRIPTION_DEVICE=cpu` and
+`RAG_LOCAL_TRANSCRIPTION_COMPUTE_TYPE=int8`) so Windows installations do not require CUDA or
+cuDNN DLLs. If you have a working GPU toolchain you can opt back into accelerated inference with:
+
+```powershell
+setx RAG_LOCAL_TRANSCRIPTION_DEVICE cuda
+setx RAG_LOCAL_TRANSCRIPTION_COMPUTE_TYPE float16
+```
+
+Restart your terminal after changing the environment variables so Uvicorn picks them up.
+
 ## Running tests
 
 ```powershell
@@ -105,4 +120,35 @@ folder provide deterministic inputs for unit and integration tests.
   without additional `PYTHONPATH` tweaks.
 - Use the "Run/Debug Configuration" templates for Uvicorn and Streamlit to launch the
   services directly from the IDE if you prefer not to use the terminal.
+
+## Troubleshooting
+
+### "Could not locate cudnn_ops64_9.dll" on Windows
+
+This error indicates that PyTorch or TensorFlow attempted to load CUDA/cuDNN kernels but
+could not find the `cudnn_ops64_9.dll` runtime in your `PATH`. To resolve it:
+
+1. **Install the matching cuDNN build.**
+   - Ensure the CUDA toolkit version you installed matches the version required by your
+     deep-learning framework (check the framework's "CUDA support" table).
+   - Download the corresponding cuDNN 9 zip from the [NVIDIA Developer downloads](https://developer.nvidia.com/cudnn-downloads) and extract it locally.
+2. **Copy the cuDNN binaries into your CUDA toolkit.** From the extracted package copy the
+   contents of the `bin`, `include`, and `lib` folders into
+   `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\vXX.X\` (replace `vXX.X` with your
+   installed CUDA version). Allow Windows to overwrite older files if prompted.
+3. **Update the system PATH.** Add the CUDA `bin` directory (for example,
+   `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin`) to the *System* PATH so
+   shells, IDEs, and services that launch Python inherit the location of the DLLs.
+4. **Restart the terminal or IDE** to ensure the updated PATH is picked up, then retry your
+   training or inference command.
+
+If you do not intend to run GPU-accelerated workloads, install the CPU-only build of your
+framework to bypass the cuDNN dependency entirely. For PyTorch you can run:
+
+```powershell
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+Pin the version as needed (for example, `pip install torch==2.3.1 --index-url ...`) to match
+your project's compatibility requirements.
 

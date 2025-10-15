@@ -105,11 +105,11 @@ class Settings(BaseSettings):
         description="Whisper model size used for local transcription fallback (e.g. tiny, base, small).",
     )
     local_transcription_device: str = Field(
-        "auto",
+        "cpu",
         description="Device hint passed to faster-whisper for local transcription (auto, cpu, cuda).",
     )
     local_transcription_compute_type: str = Field(
-        "auto",
+        "int8",
         description="Compute type for the local Whisper model (auto, float16, int8, etc.).",
     )
     local_transcription_only: bool = Field(
