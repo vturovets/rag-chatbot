@@ -203,10 +203,25 @@ class ExtractionService:
                     raise exceptions.rate_limit_exceeded() from exc
                 await asyncio.sleep(delay)
                 delay *= 2
+            except APIConnectionError as exc:
+                raise exceptions.transcription_error(
+                    hint="Unable to reach the OpenAI Whisper API. Verify network connectivity or OPENAI_API_BASE."
+                ) from exc
             except asyncio.TimeoutError as exc:
                 raise exceptions.timeout_stage("Processing timed out while transcribing audio.") from exc
-            except (APITimeoutError, APIConnectionError, APIStatusError, APIError, OpenAIError) as exc:
-                raise exceptions.transcription_error() from exc
+            except APITimeoutError as exc:
+                raise exceptions.timeout_stage("Processing timed out while transcribing audio.") from exc
+            except APIStatusError as exc:
+                status_code = getattr(exc, "status_code", None)
+                if status_code == 429:
+                    raise exceptions.rate_limit_exceeded() from exc
+                if status_code == 401:
+                    raise exceptions.transcription_error(
+                        hint="OpenAI authentication failed. Set RAG_OPENAI_API_KEY or OPENAI_API_KEY with a valid key."
+                    ) from exc
+                raise exceptions.transcription_error(hint=self._openai_error_hint(exc)) from exc
+            except (APIError, OpenAIError) as exc:
+                raise exceptions.transcription_error(hint=self._openai_error_hint(exc)) from exc
 
         raise exceptions.transcription_error() from last_exception
 
@@ -227,6 +242,16 @@ class ExtractionService:
                 if response.get(key):
                     return str(response[key]).strip()
         return ""
+
+    @staticmethod
+    def _openai_error_hint(exc: Exception) -> str | None:
+        """Extract a human-friendly hint from an OpenAI exception."""
+
+        message = getattr(exc, "message", None)
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+        text = str(exc).strip()
+        return text or None
 
 
 __all__ = ["ExtractionService"]
