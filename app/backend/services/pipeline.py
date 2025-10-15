@@ -7,7 +7,7 @@ import math
 import time
 from dataclasses import asdict
 from typing import List, Sequence
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.backend import exceptions
 from app.backend.config import get_settings
@@ -15,6 +15,7 @@ from app.backend.models.chat import (
     ChatRequest,
     ChatResponse,
     Chunk,
+    DebugPipelineRequest,
     DebugPipelineResponse,
     EmbedVector,
     PipelineStageDiagnostics,
@@ -371,51 +372,79 @@ class PipelineService:
         right_norm = math.sqrt(sum(r * r for r in right)) or 1.0
         return dot / (left_norm * right_norm)
 
-    async def debug_pipeline(self, file_id: UUID, break_at: str, raw: bool) -> DebugPipelineResponse:
+    async def debug_pipeline(
+        self, request: DebugPipelineRequest, break_at: str, raw: bool
+    ) -> DebugPipelineResponse:
         allowed_stages = ["extract", "chunk", "embed", "retrieve", "generate"]
         target_stage = break_at.strip().lower()
         if target_stage not in allowed_stages:
             raise exceptions.invalid_debug_stage()
 
+        chunk_size = request.chunk_size or self._settings.chunk_size
+        chunk_overlap = request.chunk_overlap or self._settings.chunk_overlap
+        try:
+            chunk_config = ChunkConfig(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        except ValueError as exc:
+            raise exceptions.invalid_request(hint=str(exc)) from exc
+
         stages: List[PipelineStageDiagnostics] = []
-        metadata = self._storage.get_metadata(file_id)
 
-        if metadata.kind == FileKind.PDF:
-            extraction = await self._extraction.extract_pdf(file_id)
-            extracted_text = extraction.text
-            extract_output = extraction.model_dump()
-            if not raw:
-                extract_output = {
-                    "pages": extraction.pages,
-                    "text": self._preview_text(extraction.text),
+        if request.file_id is not None:
+            metadata = self._storage.get_metadata(request.file_id)
+
+            if metadata.kind == FileKind.PDF:
+                extraction = await self._extraction.extract_pdf(request.file_id)
+                extracted_text = extraction.text
+                extract_output = extraction.model_dump()
+                if not raw:
+                    extract_output = {
+                        "pages": extraction.pages,
+                        "text": self._preview_text(extraction.text),
+                    }
+                extract_input: dict[str, object] = {
+                    "file_id": str(request.file_id),
+                    "file_type": metadata.kind.value,
                 }
-            extract_input: dict[str, object] = {
-                "file_id": str(file_id),
-                "file_type": metadata.kind.value,
-            }
+            else:
+                transcription = await self._extraction.transcribe_audio(request.file_id)
+                extracted_text = transcription.transcript
+                extract_output = transcription.model_dump()
+                if not raw:
+                    extract_output = {
+                        "duration_seconds": transcription.duration_seconds,
+                        "transcript": self._preview_text(transcription.transcript),
+                    }
+                extract_input = {
+                    "file_id": str(request.file_id),
+                    "file_type": metadata.kind.value,
+                    "language": "en",
+                }
+            if raw:
+                extract_input["filename"] = metadata.filename
+            stages.append(
+                PipelineStageDiagnostics(
+                    stage="extract", input_payload=extract_input, output_payload=extract_output
+                )
+            )
+            if target_stage == "extract":
+                return DebugPipelineResponse(stages=stages)
+            extracted_source_id = request.file_id
         else:
-            transcription = await self._extraction.transcribe_audio(file_id)
-            extracted_text = transcription.transcript
-            extract_output = transcription.model_dump()
-            if not raw:
-                extract_output = {
-                    "duration_seconds": transcription.duration_seconds,
-                    "transcript": self._preview_text(transcription.transcript),
-                }
-            extract_input = {
-                "file_id": str(file_id),
-                "file_type": metadata.kind.value,
-                "language": "en",
-            }
-        if raw:
-            extract_input["filename"] = metadata.filename
-        stages.append(
-            PipelineStageDiagnostics(stage="extract", input_payload=extract_input, output_payload=extract_output)
-        )
-        if target_stage == "extract":
-            return DebugPipelineResponse(stages=stages)
+            if target_stage != "chunk":
+                raise exceptions.invalid_request(
+                    hint="file_id is required to debug stages beyond chunk."
+                )
+            provided_text = request.text or ""
+            if not provided_text.strip():
+                raise exceptions.invalid_request(hint="Text payload cannot be empty.")
+            extracted_text = provided_text
+            extracted_source_id = uuid4()
 
-        chunks, normalized_chunks = self._chunk_text(extracted_text, file_id)
+        normalized_chunks = chunk_text(extracted_text, chunk_config)
+        chunks = [
+            Chunk(text=piece.text, source_file_id=extracted_source_id, order=order)
+            for order, piece in enumerate(normalized_chunks)
+        ]
         total_tokens = sum(item.token_count for item in normalized_chunks)
         chunk_total = len(normalized_chunks)
         chunk_counts: dict[str, float | int] = {
@@ -437,8 +466,8 @@ class PipelineService:
         if raw:
             chunk_output["token_windows"] = [asdict(item) for item in normalized_chunks]
         chunk_input: dict[str, object] = {
-            "chunk_size": self._settings.chunk_size,
-            "overlap": self._settings.chunk_overlap,
+            "chunk_size": chunk_config.chunk_size,
+            "overlap": chunk_config.chunk_overlap,
         }
         if raw:
             chunk_input["text"] = extracted_text
@@ -448,6 +477,9 @@ class PipelineService:
             PipelineStageDiagnostics(stage="chunk", input_payload=chunk_input, output_payload=chunk_output)
         )
         if target_stage == "chunk":
+            return DebugPipelineResponse(stages=stages)
+
+        if request.file_id is None:
             return DebugPipelineResponse(stages=stages)
 
         vectors = self._embeddings.embed_chunks(chunks)
