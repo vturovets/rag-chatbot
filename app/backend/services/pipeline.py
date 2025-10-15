@@ -15,6 +15,7 @@ from app.backend.models.chat import (
     ChatRequest,
     ChatResponse,
     Chunk,
+    DebugChunkPayload,
     DebugPipelineRequest,
     DebugPipelineResponse,
     EmbedVector,
@@ -332,6 +333,37 @@ class PipelineService:
         cleaned = " ".join(fallback_text.strip().split())
         return cleaned[:120] or "debug pipeline probe"
 
+    def _build_chunks_from_payload(
+        self, payloads: Sequence[DebugChunkPayload], source_file_id: UUID
+    ) -> tuple[List[Chunk], List[NormalizedChunk]]:
+        normalized: List[NormalizedChunk] = []
+        chunks: List[Chunk] = []
+        start_token = 0
+        for payload in sorted(payloads, key=lambda item: item.order):
+            text = payload.resolved_text()
+            if not text:
+                continue
+            token_count = len(text.split())
+            end_token = start_token + token_count
+            normalized.append(
+                NormalizedChunk(
+                    text=text,
+                    token_count=token_count,
+                    start_token=start_token,
+                    end_token=end_token,
+                )
+            )
+            chunks.append(
+                Chunk(
+                    chunk_id=payload.chunk_id,
+                    text=text,
+                    source_file_id=source_file_id,
+                    order=payload.order,
+                )
+            )
+            start_token = end_token
+        return chunks, normalized
+
     def _rank_hits(
         self,
         query_vector: Sequence[float],
@@ -388,6 +420,9 @@ class PipelineService:
             raise exceptions.invalid_request(hint=str(exc)) from exc
 
         stages: List[PipelineStageDiagnostics] = []
+        provided_chunks = request.chunks or []
+        sorted_chunk_payloads = sorted(provided_chunks, key=lambda item: item.order)
+        inline_text = (request.text or "").strip()
 
         if request.file_id is not None:
             metadata = self._storage.get_metadata(request.file_id)
@@ -430,21 +465,32 @@ class PipelineService:
                 return DebugPipelineResponse(stages=stages)
             extracted_source_id = request.file_id
         else:
-            if target_stage != "chunk":
+            if target_stage != "chunk" and not sorted_chunk_payloads:
                 raise exceptions.invalid_request(
-                    hint="file_id is required to debug stages beyond chunk."
+                    hint="file_id or chunks payload is required to debug stages beyond chunk."
                 )
-            provided_text = request.text or ""
-            if not provided_text.strip():
+            if not inline_text and not sorted_chunk_payloads:
                 raise exceptions.invalid_request(hint="Text payload cannot be empty.")
-            extracted_text = provided_text
+            if inline_text:
+                extracted_text = inline_text
+            else:
+                extracted_text = "\n\n".join(chunk.resolved_text() for chunk in sorted_chunk_payloads)
             extracted_source_id = uuid4()
 
-        normalized_chunks = chunk_text(extracted_text, chunk_config)
-        chunks = [
-            Chunk(text=piece.text, source_file_id=extracted_source_id, order=order)
-            for order, piece in enumerate(normalized_chunks)
-        ]
+        if (
+            sorted_chunk_payloads
+            and request.file_id is None
+            and not inline_text
+        ):
+            chunks, normalized_chunks = self._build_chunks_from_payload(
+                sorted_chunk_payloads, extracted_source_id
+            )
+        else:
+            normalized_chunks = chunk_text(extracted_text, chunk_config)
+            chunks = [
+                Chunk(text=piece.text, source_file_id=extracted_source_id, order=order)
+                for order, piece in enumerate(normalized_chunks)
+            ]
         total_tokens = sum(item.token_count for item in normalized_chunks)
         chunk_total = len(normalized_chunks)
         chunk_counts: dict[str, float | int] = {
@@ -479,7 +525,7 @@ class PipelineService:
         if target_stage == "chunk":
             return DebugPipelineResponse(stages=stages)
 
-        if request.file_id is None:
+        if request.file_id is None and not sorted_chunk_payloads:
             return DebugPipelineResponse(stages=stages)
 
         vectors = self._embeddings.embed_chunks(chunks)

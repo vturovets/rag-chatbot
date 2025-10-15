@@ -129,6 +129,39 @@ def test_debug_chunk_accepts_inline_text(client):
     assert output_payload["chunks"], "Expected chunk previews in response"
 
 
+def test_debug_embed_accepts_chunk_payload(client):
+    seed_text = (
+        "Term Plain definition Analogy GGUF models A new, efficient file format used to store and run AI language "
+        "models like LLaMA with better speed."
+    )
+    chunk_response = client.post(
+        "/debug/pipeline",
+        params={"break_at": "chunk", "raw": True},
+        json={
+            "text": seed_text,
+            "chunk_size": 120,
+            "chunk_overlap": 20,
+        },
+    )
+    assert chunk_response.status_code == 200, chunk_response.text
+    chunk_payload = chunk_response.json()["stages"][0]["output_payload"]["chunks"]
+    assert chunk_payload, "Expected chunk payload from chunk stage"
+
+    embed_response = client.post(
+        "/debug/pipeline",
+        params={"break_at": "embed", "raw": True},
+        json={"chunks": chunk_payload},
+    )
+    assert embed_response.status_code == 200, embed_response.text
+    embed_payload = embed_response.json()
+    assert len(embed_payload["stages"]) == 2
+    embed_stage = embed_payload["stages"][-1]
+    assert embed_stage["stage"] == "embed"
+    vectors_info = embed_stage["output_payload"]["vectors"]
+    assert vectors_info["count"] >= 1
+    assert vectors_info["dim"] > 0
+
+
 def test_chat_missing_query_validation(client):
     response = client.post(
         "/chat",
