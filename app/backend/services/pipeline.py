@@ -423,6 +423,69 @@ class PipelineService:
         provided_chunks = request.chunks or []
         sorted_chunk_payloads = sorted(provided_chunks, key=lambda item: item.order)
         inline_text = (request.text or "").strip()
+        inline_query = (request.query or "").strip()
+
+        if (
+            request.file_id is None
+            and not sorted_chunk_payloads
+            and not inline_text
+            and target_stage in {"retrieve", "generate"}
+        ):
+            if not inline_query:
+                raise exceptions.invalid_request(hint="Query payload cannot be empty.")
+            requested_top_k = request.top_k or self._settings.top_k
+            top_k = max(1, min(requested_top_k, 8))
+            hits = await self._retrieve_with_timeout(
+                inline_query,
+                top_k,
+                allowed_source_ids=[],
+            )
+            retrieve_input = {"query": inline_query, "top_k": top_k}
+            retrieve_hits: List[dict[str, object]] = []
+            for hit in hits:
+                entry: dict[str, object] = {
+                    "chunk_id": str(hit.chunk_id),
+                    "score": round(hit.score, 6),
+                    "source_file_id": str(hit.source_file_id),
+                }
+                entry["text" if raw else "preview"] = (
+                    hit.text if raw else self._preview_text(hit.text)
+                )
+                retrieve_hits.append(entry)
+            stages.append(
+                PipelineStageDiagnostics(
+                    stage="retrieve",
+                    input_payload=retrieve_input,
+                    output_payload={"hits": retrieve_hits, "count": len(retrieve_hits)},
+                )
+            )
+            if target_stage == "retrieve":
+                return DebugPipelineResponse(stages=stages)
+            prompt = await self._build_prompt_with_timeout(inline_query, hits)
+            context = [hit.text for hit in hits]
+            answer = await self._generate_with_guard(
+                prompt=prompt,
+                query=inline_query,
+                context=context,
+            )
+            generate_input = {
+                "query": inline_query,
+                "context_ids": [str(hit.chunk_id) for hit in hits],
+            }
+            generate_output: dict[str, object] = {
+                "prompt": prompt if raw else self._preview_text(prompt, limit=320),
+                "answer": answer,
+            }
+            if raw:
+                generate_output["context"] = context
+            stages.append(
+                PipelineStageDiagnostics(
+                    stage="generate",
+                    input_payload=generate_input,
+                    output_payload=generate_output,
+                )
+            )
+            return DebugPipelineResponse(stages=stages)
 
         if request.file_id is not None:
             metadata = self._storage.get_metadata(request.file_id)

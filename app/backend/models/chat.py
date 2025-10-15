@@ -84,17 +84,22 @@ class DebugPipelineRequest(BaseModel):
 
     file_id: UUID | None = None
     text: str | None = None
+    query: str | None = None
     chunk_size: int | None = Field(default=None, ge=1)
     chunk_overlap: int | None = Field(default=None, ge=0)
+    top_k: int | None = Field(default=None, ge=1, le=8)
     chunks: List[DebugChunkPayload] | None = None
 
     @model_validator(mode="after")
     def _validate_payload(self) -> "DebugPipelineRequest":
         if self.file_id is None:
             text = (self.text or "").strip()
+            query = (self.query or "").strip()
             has_chunks = bool(self.chunks)
-            if not text and not has_chunks:
-                raise ValueError("text or chunks is required when file_id is not provided")
+            if not text and not has_chunks and not query:
+                raise ValueError(
+                    "text, chunks, or query is required when file_id is not provided"
+                )
         if self.chunk_size is not None and self.chunk_overlap is not None:
             if self.chunk_overlap >= self.chunk_size:
                 raise ValueError("chunk_overlap must be smaller than chunk_size")
