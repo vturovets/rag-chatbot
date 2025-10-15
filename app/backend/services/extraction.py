@@ -115,8 +115,8 @@ class ExtractionService:
 
         try:
             model_size = getattr(self._settings, "local_transcription_model", "base")
-            device = getattr(self._settings, "local_transcription_device", "auto")
-            compute_type = getattr(self._settings, "local_transcription_compute_type", "auto")
+            device = getattr(self._settings, "local_transcription_device", "cpu")
+            compute_type = getattr(self._settings, "local_transcription_compute_type", "int8")
             self._local_transcriber = LocalTranscriber(model_size, device, compute_type)
         except ImportError as exc:  # pragma: no cover - dependency guard
             raise exceptions.transcription_error(
