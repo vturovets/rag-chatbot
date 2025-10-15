@@ -219,6 +219,15 @@ class ExtractionService:
                     raise exceptions.transcription_error(
                         hint="OpenAI authentication failed. Set RAG_OPENAI_API_KEY or OPENAI_API_KEY with a valid key."
                     ) from exc
+                if status_code == 404:
+                    raise exceptions.transcription_error(
+                        hint=(
+                            "The configured transcription model "
+                            f"'{self._settings.whisper_model}' is unavailable. "
+                            "Set RAG_WHISPER_MODEL to a supported option such as "
+                            "'gpt-4o-mini-transcribe'."
+                        )
+                    ) from exc
                 raise exceptions.transcription_error(hint=self._openai_error_hint(exc)) from exc
             except (APIError, OpenAIError) as exc:
                 raise exceptions.transcription_error(hint=self._openai_error_hint(exc)) from exc

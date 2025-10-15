@@ -47,6 +47,8 @@ tests/            # Automated test suite (pytest + HTTPX clients)
 
    ```env
    RAG_OPENAI_API_KEY="sk-..."
+   # Optional transcription model override (defaults to gpt-4o-mini-transcribe)
+   # RAG_WHISPER_MODEL="gpt-4o-transcribe"
    # Optional overrides
    # RAG_GOOGLE_API_KEY="your-google-api-key"
    # RAG_LLM_PROVIDER="openai"  # or "google"

@@ -92,7 +92,13 @@ class Settings(BaseSettings):
 
     transcription_max_retries: int = Field(3, ge=1, description="Retry attempts for transcription API")
     transcription_retry_backoff_s: float = Field(1.0, gt=0, description="Initial backoff for retries")
-    whisper_model: str = Field("whisper-large-v3", description="Whisper model identifier")
+    whisper_model: str = Field(
+        "gpt-4o-mini-transcribe",
+        description=(
+            "Transcription model identifier used for audio uploads. Defaults to the OpenAI "
+            "gpt-4o-mini-transcribe model, which is available to all API customers."
+        ),
+    )
 
     openai_api_key: str | None = Field(default=None, description="API key for OpenAI services")
     openai_api_base: str | None = Field(default=None, description="Optional override for OpenAI API base URL")
