@@ -106,6 +106,29 @@ def test_debug_endpoint_requires_debug_mode(client, monkeypatch):
     assert "development mode" in payload["message"].lower()
 
 
+def test_debug_chunk_accepts_inline_text(client):
+    response = client.post(
+        "/debug/pipeline",
+        params={"break_at": "chunk"},
+        json={
+            "text": "Term Plain definition Analogy GGUF models A new, efficient file format used to store and run AI language models",
+            "chunk_size": 200,
+            "chunk_overlap": 40,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert len(payload["stages"]) == 1
+    chunk_stage = payload["stages"][0]
+    assert chunk_stage["stage"] == "chunk"
+    input_payload = chunk_stage["input_payload"]
+    assert input_payload["chunk_size"] == 200
+    assert input_payload["overlap"] == 40
+    output_payload = chunk_stage["output_payload"]
+    assert output_payload["counts"]["chunks"] >= 1
+    assert output_payload["chunks"], "Expected chunk previews in response"
+
+
 def test_chat_missing_query_validation(client):
     response = client.post(
         "/chat",

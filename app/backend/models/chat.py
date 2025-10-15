@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Chunk(BaseModel):
@@ -61,7 +61,21 @@ class PipelineStageDiagnostics(BaseModel):
 class DebugPipelineRequest(BaseModel):
     """Request for the debug pipeline endpoint."""
 
-    file_id: UUID
+    file_id: UUID | None = None
+    text: str | None = None
+    chunk_size: int | None = Field(default=None, ge=1)
+    chunk_overlap: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_payload(self) -> "DebugPipelineRequest":
+        if self.file_id is None:
+            text = (self.text or "").strip()
+            if not text:
+                raise ValueError("text is required when file_id is not provided")
+        if self.chunk_size is not None and self.chunk_overlap is not None:
+            if self.chunk_overlap >= self.chunk_size:
+                raise ValueError("chunk_overlap must be smaller than chunk_size")
+        return self
 
 
 class DebugPipelineResponse(BaseModel):

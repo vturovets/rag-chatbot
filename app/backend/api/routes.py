@@ -151,7 +151,7 @@ async def debug_pipeline(
 ) -> DebugPipelineResponse:
     if not settings.debug_mode:
         raise exceptions.unauthorized_debug()
-    return await pipeline.debug_pipeline(request.file_id, break_at, raw)
+    return await pipeline.debug_pipeline(request, break_at, raw)
 
 
 __all__ = ["router"]
