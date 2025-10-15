@@ -112,6 +112,10 @@ class Settings(BaseSettings):
         "auto",
         description="Compute type for the local Whisper model (auto, float16, int8, etc.).",
     )
+    local_transcription_only: bool = Field(
+        False,
+        description="When true, bypasses external transcription APIs and relies solely on faster-whisper.",
+    )
 
     openai_api_key: str | None = Field(default=None, description="API key for OpenAI services")
     openai_api_base: str | None = Field(default=None, description="Optional override for OpenAI API base URL")

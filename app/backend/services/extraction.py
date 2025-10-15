@@ -50,15 +50,45 @@ class LocalTranscriber:
         self._compute_type = compute_type
         self._model: WhisperModel | None = None
 
-    def transcribe(self, path: Path) -> str:
-        if self._model is None:
+    def _ensure_model(self) -> WhisperModel:
+        if self._model is not None:
+            return self._model
+
+        try:
             self._model = WhisperModel(
                 self._model_size,
                 device=self._device,
                 compute_type=self._compute_type,
             )
+            return self._model
+        except Exception as primary_exc:
+            fallback_device = "cpu"
+            if self._device == fallback_device:
+                raise
 
-        segments, _ = self._model.transcribe(str(path), beam_size=5)
+            fallback_compute_type = self._compute_type
+            if fallback_compute_type not in {"auto", "int8", "int8_float16", "int8_float32"}:
+                fallback_compute_type = "int8"
+
+            try:
+                self._model = WhisperModel(
+                    self._model_size,
+                    device=fallback_device,
+                    compute_type=fallback_compute_type,
+                )
+                self._device = fallback_device
+                self._compute_type = fallback_compute_type
+                return self._model
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    "Failed to initialize faster-whisper on any device. "
+                    f"Primary error: {primary_exc}. Fallback error: {fallback_exc}"
+                ) from primary_exc
+
+    def transcribe(self, path: Path) -> str:
+        model = self._ensure_model()
+
+        segments, _ = model.transcribe(str(path), beam_size=5)
         transcript = " ".join(segment.text.strip() for segment in segments if segment.text).strip()
         if not transcript:
             raise ValueError("Local transcription returned no text")
@@ -306,6 +336,9 @@ class ExtractionService:
         return TranscriptionResult(transcript=transcript, duration_seconds=duration_seconds)
 
     async def _transcribe_with_whisper(self, path: Path) -> str:
+        if getattr(self._settings, "local_transcription_only", False):
+            return await self._transcribe_locally(path)
+
         if self._openai_client is None:
             return await self._transcribe_locally(path)
 

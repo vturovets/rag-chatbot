@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from app.backend import exceptions
-from app.backend.services.extraction import ExtractionService, OpenAIError
+from app.backend.services.extraction import ExtractionService, LocalTranscriber, OpenAIError
 
 FIXTURES_DIR = Path("fixtures")
 
@@ -279,3 +279,59 @@ def test_local_transcription_reports_missing_ffmpeg(monkeypatch):
     payload = excinfo.value.detail
     assert payload["error_code"] == "TRANSCRIPTION_ERROR"
     assert "ffmpeg" in payload.get("hint", "").lower()
+
+
+def test_local_transcription_only_skips_remote(monkeypatch, tmp_path):
+    from app.backend import config
+
+    monkeypatch.setenv("RAG_LOCAL_TRANSCRIPTION_ONLY", "true")
+    monkeypatch.delenv("RAG_OPENAI_API_KEY", raising=False)
+    config.get_settings.cache_clear()
+
+    service = ExtractionService()
+
+    calls: dict[str, int] = {"local": 0}
+
+    async def fake_local(self, path):
+        calls["local"] += 1
+        return "local"
+
+    monkeypatch.setattr(ExtractionService, "_transcribe_locally", fake_local)
+
+    try:
+        dummy_audio = tmp_path / "audio.mp3"
+        dummy_audio.write_bytes(b"test")
+        result = asyncio.run(service._transcribe_with_whisper(dummy_audio))
+        assert result == "local"
+        assert calls["local"] == 1
+    finally:
+        config.get_settings.cache_clear()
+
+
+def test_local_transcriber_falls_back_to_cpu(monkeypatch, tmp_path):
+    created_devices: list[tuple[str, str]] = []
+
+    class DummySegment:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class DummyModel:
+        def __init__(self, model_size: str, device: str, compute_type: str) -> None:
+            created_devices.append((device, compute_type))
+            if device != "cpu":
+                raise RuntimeError("Invalid handle. Cannot load symbol cudnnCreateTensorDescriptor")
+
+        def transcribe(self, path: str, beam_size: int):  # pragma: no cover - shim signature
+            return ([DummySegment("  success  ")], None)
+
+    monkeypatch.setattr("app.backend.services.extraction.WhisperModel", DummyModel)
+
+    audio_path = tmp_path / "dummy.wav"
+    audio_path.write_bytes(b"data")
+
+    transcriber = LocalTranscriber("base", device="cuda", compute_type="float16")
+    transcript = transcriber.transcribe(audio_path)
+
+    assert transcript == "success"
+    assert created_devices[0][0] == "cuda"
+    assert created_devices[-1][0] == "cpu"
