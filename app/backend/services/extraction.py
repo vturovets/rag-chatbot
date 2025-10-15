@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -25,19 +28,179 @@ try:  # pragma: no cover - optional dependency in some environments
 except ImportError:  # pragma: no cover - compatibility fallback
     APIStatusError = APIError
 
+try:  # pragma: no cover - optional local transcription dependency
+    from faster_whisper import WhisperModel
+except ImportError:  # pragma: no cover - make dependency optional for environments without it
+    WhisperModel = None  # type: ignore[misc]
+
 from app.backend import exceptions
 from app.backend.config import get_settings
 from app.backend.models.ingestion import ExtractionResult, TranscriptionResult
 from app.backend.services.storage import FileStorage
 
 
+class LocalTranscriber:
+    """Lightweight wrapper around faster-whisper for local inference."""
+
+    def __init__(self, model_size: str, device: str, compute_type: str) -> None:
+        if WhisperModel is None:  # pragma: no cover - enforced via dependency
+            raise ImportError("faster-whisper is not installed")
+        self._model_size = model_size
+        self._device = device
+        self._compute_type = compute_type
+        self._model: WhisperModel | None = None
+
+    def _ensure_model(self) -> WhisperModel:
+        if self._model is not None:
+            return self._model
+
+        try:
+            self._model = WhisperModel(
+                self._model_size,
+                device=self._device,
+                compute_type=self._compute_type,
+            )
+            return self._model
+        except Exception as primary_exc:
+            fallback_device = "cpu"
+            if self._device == fallback_device:
+                raise
+
+            fallback_compute_type = self._compute_type
+            if fallback_compute_type not in {"auto", "int8", "int8_float16", "int8_float32"}:
+                fallback_compute_type = "int8"
+
+            try:
+                self._model = WhisperModel(
+                    self._model_size,
+                    device=fallback_device,
+                    compute_type=fallback_compute_type,
+                )
+                self._device = fallback_device
+                self._compute_type = fallback_compute_type
+                return self._model
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    "Failed to initialize faster-whisper on any device. "
+                    f"Primary error: {primary_exc}. Fallback error: {fallback_exc}"
+                ) from primary_exc
+
+    def transcribe(self, path: Path) -> str:
+        model = self._ensure_model()
+
+        segments, _ = model.transcribe(str(path), beam_size=5)
+        transcript = " ".join(segment.text.strip() for segment in segments if segment.text).strip()
+        if not transcript:
+            raise ValueError("Local transcription returned no text")
+        return transcript
+
+
 class ExtractionService:
     """Aggregate PDF extraction and audio transcription logic."""
 
-    def __init__(self, storage: FileStorage | None = None, openai_client: AsyncOpenAI | None = None) -> None:
+    def __init__(
+        self,
+        storage: FileStorage | None = None,
+        openai_client: AsyncOpenAI | None = None,
+        local_transcriber: LocalTranscriber | None = None,
+    ) -> None:
         self._settings = get_settings()
         self._storage = storage or FileStorage()
         self._openai_client = openai_client or self._build_openai_client()
+        self._local_transcriber = local_transcriber
+
+    def _get_local_transcriber(self) -> LocalTranscriber:
+        if self._local_transcriber is not None:
+            return self._local_transcriber
+
+        try:
+            model_size = getattr(self._settings, "local_transcription_model", "base")
+            device = getattr(self._settings, "local_transcription_device", "auto")
+            compute_type = getattr(self._settings, "local_transcription_compute_type", "auto")
+            self._local_transcriber = LocalTranscriber(model_size, device, compute_type)
+        except ImportError as exc:  # pragma: no cover - dependency guard
+            raise exceptions.transcription_error(
+                hint="Install the 'faster-whisper' package to enable local transcription."
+            ) from exc
+        except Exception as exc:  # pragma: no cover - model initialization failure
+            raise exceptions.transcription_error(
+                hint=f"Failed to initialize local Whisper model: {exc}"
+            ) from exc
+
+        return self._local_transcriber
+
+    def _convert_to_wav(self, source: Path) -> Path:
+        temp_dir = Path(tempfile.mkdtemp(prefix="rag-transcribe-"))
+        target = temp_dir / "audio.wav"
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            str(target),
+        ]
+
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise exceptions.transcription_error(
+                hint="ffmpeg is required for local transcription. Install ffmpeg and try again."
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.strip() if isinstance(exc.stderr, str) else None
+            raise exceptions.transcription_error(
+                hint=stderr or "ffmpeg failed while converting the audio file."
+            ) from exc
+
+        if not target.exists():
+            raise exceptions.transcription_error(
+                hint="ffmpeg did not produce the expected WAV output."
+            )
+
+        return target
+
+    def _cleanup_temp_audio(self, path: Path) -> None:
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:  # pragma: no cover - best effort cleanup
+            pass
+        temp_dir = path.parent
+        if temp_dir.name.startswith("rag-transcribe-"):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _transcribe_locally_sync(self, path: Path) -> str:
+        converted = self._convert_to_wav(path)
+        try:
+            transcriber = self._get_local_transcriber()
+            try:
+                transcript = transcriber.transcribe(converted)
+            except Exception as exc:
+                hint = str(exc).strip() or "Local transcription failed."
+                raise exceptions.transcription_error(hint=hint) from exc
+        finally:
+            self._cleanup_temp_audio(converted)
+
+        return transcript
+
+    async def _transcribe_locally(self, path: Path) -> str:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._transcribe_locally_sync, path),
+                timeout=self._settings.transcription_timeout_s,
+            )
+        except asyncio.TimeoutError as exc:
+            raise exceptions.timeout_stage("Processing timed out while transcribing audio.") from exc
 
     def _build_openai_client(self) -> AsyncOpenAI | None:
         api_key = self._resolve_openai_api_key()
@@ -173,10 +336,11 @@ class ExtractionService:
         return TranscriptionResult(transcript=transcript, duration_seconds=duration_seconds)
 
     async def _transcribe_with_whisper(self, path: Path) -> str:
+        if getattr(self._settings, "local_transcription_only", False):
+            return await self._transcribe_locally(path)
+
         if self._openai_client is None:
-            raise exceptions.transcription_error(
-                hint="Set RAG_OPENAI_API_KEY or OPENAI_API_KEY to enable transcription."
-            )
+            return await self._transcribe_locally(path)
 
         delay = self._settings.transcription_retry_backoff_s
         attempts = self._settings.transcription_max_retries
@@ -228,9 +392,15 @@ class ExtractionService:
                             "'gpt-4o-mini-transcribe'."
                         )
                     ) from exc
-                raise exceptions.transcription_error(hint=self._openai_error_hint(exc)) from exc
+                hint = self._openai_error_hint(exc)
+                if self._should_use_local_fallback(hint):
+                    return await self._transcribe_locally(path)
+                raise exceptions.transcription_error(hint=hint) from exc
             except (APIError, OpenAIError) as exc:
-                raise exceptions.transcription_error(hint=self._openai_error_hint(exc)) from exc
+                hint = self._openai_error_hint(exc)
+                if self._should_use_local_fallback(hint):
+                    return await self._transcribe_locally(path)
+                raise exceptions.transcription_error(hint=hint) from exc
 
         raise exceptions.transcription_error() from last_exception
 
@@ -262,5 +432,11 @@ class ExtractionService:
         text = str(exc).strip()
         return text or None
 
+    def _should_use_local_fallback(self, hint: str | None) -> bool:
+        if not hint:
+            return False
+        normalized = hint.lower()
+        return "unsupported file format" in normalized or "unsupported_value" in normalized
 
-__all__ = ["ExtractionService"]
+
+__all__ = ["ExtractionService", "LocalTranscriber"]

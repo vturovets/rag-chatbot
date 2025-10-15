@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from app.backend.services.extraction import ExtractionService
+from app.backend import exceptions
+from app.backend.services.extraction import ExtractionService, LocalTranscriber, OpenAIError
 
 FIXTURES_DIR = Path("fixtures")
 
@@ -225,3 +227,111 @@ def test_chat_missing_query_validation(client):
     payload = response.json()
     assert payload["error_code"] == "MISSING_QUERY"
     assert "required" in payload["message"].lower()
+
+
+def test_transcription_falls_back_to_local_when_openai_rejects(monkeypatch):
+    service = ExtractionService()
+
+    class DummyTranscriptions:
+        async def create(self, *args, **kwargs):
+            raise OpenAIError("Unsupported file format from test")
+
+    class DummyAudio:
+        def __init__(self) -> None:
+            self.transcriptions = DummyTranscriptions()
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self.audio = DummyAudio()
+
+    service._openai_client = DummyClient()
+
+    flag = {"local": False}
+
+    async def _fake_local(self, path):
+        flag["local"] = True
+        return "local transcript"
+
+    monkeypatch.setattr(ExtractionService, "_transcribe_locally", _fake_local)
+
+    transcript = asyncio.run(service._transcribe_with_whisper(FIXTURES_DIR / "sample_clean.mp3"))
+
+    assert transcript == "local transcript"
+    assert flag["local"] is True
+
+
+def test_local_transcription_reports_missing_ffmpeg(monkeypatch):
+    service = ExtractionService()
+
+    class DummyLocal:
+        def transcribe(self, path):
+            return "stub"
+
+    def _raise_ffmpeg(*args, **kwargs):
+        raise FileNotFoundError("ffmpeg not found")
+
+    monkeypatch.setattr("app.backend.services.extraction.subprocess.run", _raise_ffmpeg)
+    monkeypatch.setattr(ExtractionService, "_get_local_transcriber", lambda self: DummyLocal())
+
+    with pytest.raises(exceptions.RagError) as excinfo:
+        asyncio.run(service._transcribe_locally(FIXTURES_DIR / "sample_clean.mp3"))
+
+    payload = excinfo.value.detail
+    assert payload["error_code"] == "TRANSCRIPTION_ERROR"
+    assert "ffmpeg" in payload.get("hint", "").lower()
+
+
+def test_local_transcription_only_skips_remote(monkeypatch, tmp_path):
+    from app.backend import config
+
+    monkeypatch.setenv("RAG_LOCAL_TRANSCRIPTION_ONLY", "true")
+    monkeypatch.delenv("RAG_OPENAI_API_KEY", raising=False)
+    config.get_settings.cache_clear()
+
+    service = ExtractionService()
+
+    calls: dict[str, int] = {"local": 0}
+
+    async def fake_local(self, path):
+        calls["local"] += 1
+        return "local"
+
+    monkeypatch.setattr(ExtractionService, "_transcribe_locally", fake_local)
+
+    try:
+        dummy_audio = tmp_path / "audio.mp3"
+        dummy_audio.write_bytes(b"test")
+        result = asyncio.run(service._transcribe_with_whisper(dummy_audio))
+        assert result == "local"
+        assert calls["local"] == 1
+    finally:
+        config.get_settings.cache_clear()
+
+
+def test_local_transcriber_falls_back_to_cpu(monkeypatch, tmp_path):
+    created_devices: list[tuple[str, str]] = []
+
+    class DummySegment:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class DummyModel:
+        def __init__(self, model_size: str, device: str, compute_type: str) -> None:
+            created_devices.append((device, compute_type))
+            if device != "cpu":
+                raise RuntimeError("Invalid handle. Cannot load symbol cudnnCreateTensorDescriptor")
+
+        def transcribe(self, path: str, beam_size: int):  # pragma: no cover - shim signature
+            return ([DummySegment("  success  ")], None)
+
+    monkeypatch.setattr("app.backend.services.extraction.WhisperModel", DummyModel)
+
+    audio_path = tmp_path / "dummy.wav"
+    audio_path.write_bytes(b"data")
+
+    transcriber = LocalTranscriber("base", device="cuda", compute_type="float16")
+    transcript = transcriber.transcribe(audio_path)
+
+    assert transcript == "success"
+    assert created_devices[0][0] == "cuda"
+    assert created_devices[-1][0] == "cpu"
