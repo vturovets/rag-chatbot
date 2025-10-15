@@ -88,6 +88,37 @@ def test_extraction_service_uses_rag_openai_key(monkeypatch):
         config.get_settings.cache_clear()
 
 
+def test_extraction_service_reads_env_file(monkeypatch, tmp_path):
+    from app.backend import config
+
+    env_file = tmp_path / ".env"
+    env_file.write_text('\n'.join([
+        "# comment should be ignored",
+        'RAG_OPENAI_API_KEY="file-key"',
+    ]))
+
+    captured_kwargs: dict[str, str] = {}
+
+    class DummyAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.delenv("RAG_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(config, "ENV_FILE", env_file)
+    monkeypatch.setattr(config.Settings, "env_file", str(env_file))
+    monkeypatch.setattr("app.backend.services.extraction.AsyncOpenAI", DummyAsyncOpenAI)
+    config.get_settings.cache_clear()
+
+    try:
+        service = ExtractionService()
+
+        assert captured_kwargs.get("api_key") == "file-key"
+        assert isinstance(service._openai_client, DummyAsyncOpenAI)
+    finally:
+        config.get_settings.cache_clear()
+
+
 def test_invalid_pdf_rejected(client, tmp_path):
     import fitz
 

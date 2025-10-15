@@ -40,20 +40,73 @@ class ExtractionService:
         self._openai_client = openai_client or self._build_openai_client()
 
     def _build_openai_client(self) -> AsyncOpenAI | None:
-        api_key = (
-            self._settings.openai_api_key
-            or os.getenv("RAG_OPENAI_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-        )
-        client_kwargs: dict[str, Any] = {}
-        if api_key:
-            client_kwargs["api_key"] = api_key
-        if self._settings.openai_api_base:
-            client_kwargs["base_url"] = self._settings.openai_api_base
+        api_key = self._resolve_openai_api_key()
+        if not api_key:
+            return None
+
+        client_kwargs: dict[str, Any] = {"api_key": api_key}
+        base_url = self._resolve_openai_base()
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
         try:
             return AsyncOpenAI(**client_kwargs)
         except Exception:  # pragma: no cover - client init errors surfaced on call
             return None
+
+    def _resolve_openai_api_key(self) -> str | None:
+        for candidate in (
+            getattr(self._settings, "openai_api_key", None),
+            os.getenv("RAG_OPENAI_API_KEY"),
+            os.getenv("OPENAI_API_KEY"),
+            self._load_env_file_api_key(),
+        ):
+            normalized = self._normalize_api_key(candidate)
+            if normalized:
+                os.environ.setdefault("OPENAI_API_KEY", normalized)
+                return normalized
+        return None
+
+    def _resolve_openai_base(self) -> str | None:
+        for candidate in (
+            getattr(self._settings, "openai_api_base", None),
+            os.getenv("RAG_OPENAI_API_BASE"),
+            os.getenv("OPENAI_API_BASE"),
+        ):
+            normalized = self._normalize_api_key(candidate)
+            if normalized:
+                return normalized
+        return None
+
+    def _load_env_file_api_key(self) -> str | None:
+        env_file = getattr(self._settings, "env_file", None)
+        if not env_file:
+            return None
+        path = Path(env_file)
+        if not path.exists():
+            return None
+        try:
+            for raw_line in path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                key, _, value = line.partition("=")
+                if key.strip() == "RAG_OPENAI_API_KEY":
+                    return value.split("#", 1)[0].strip()
+        except OSError:  # pragma: no cover - filesystem errors
+            return None
+        return None
+
+    @staticmethod
+    def _normalize_api_key(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if cleaned[0] == cleaned[-1] and cleaned[0] in {'"', "'"} and len(cleaned) >= 2:
+            cleaned = cleaned[1:-1].strip()
+        return cleaned or None
 
     async def extract_pdf(self, file_id: UUID) -> ExtractionResult:
         path = self._storage.get_file(file_id)
