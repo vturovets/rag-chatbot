@@ -100,6 +100,19 @@ class Settings(BaseSettings):
         ),
     )
 
+    local_transcription_model: str = Field(
+        "base",
+        description="Whisper model size used for local transcription fallback (e.g. tiny, base, small).",
+    )
+    local_transcription_device: str = Field(
+        "auto",
+        description="Device hint passed to faster-whisper for local transcription (auto, cpu, cuda).",
+    )
+    local_transcription_compute_type: str = Field(
+        "auto",
+        description="Compute type for the local Whisper model (auto, float16, int8, etc.).",
+    )
+
     openai_api_key: str | None = Field(default=None, description="API key for OpenAI services")
     openai_api_base: str | None = Field(default=None, description="Optional override for OpenAI API base URL")
     google_api_key: str | None = Field(default=None, description="API key for Google Generative AI")
