@@ -65,6 +65,29 @@ def test_audio_ingestion_and_retrieval(client, stub_transcription):
     assert "launch" in answer and "readiness" in answer
 
 
+def test_extraction_service_uses_rag_openai_key(monkeypatch):
+    from app.backend import config
+
+    captured_kwargs: dict[str, str] = {}
+
+    class DummyAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setenv("RAG_OPENAI_API_KEY", "dummy-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("app.backend.services.extraction.AsyncOpenAI", DummyAsyncOpenAI)
+    config.get_settings.cache_clear()
+
+    try:
+        service = ExtractionService()
+
+        assert captured_kwargs.get("api_key") == "dummy-key"
+        assert isinstance(service._openai_client, DummyAsyncOpenAI)
+    finally:
+        config.get_settings.cache_clear()
+
+
 def test_invalid_pdf_rejected(client, tmp_path):
     import fitz
 
