@@ -40,7 +40,11 @@ class ExtractionService:
         self._openai_client = openai_client or self._build_openai_client()
 
     def _build_openai_client(self) -> AsyncOpenAI | None:
-        api_key = self._settings.openai_api_key or os.getenv("OPENAI_API_KEY")
+        api_key = (
+            self._settings.openai_api_key
+            or os.getenv("RAG_OPENAI_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+        )
         client_kwargs: dict[str, Any] = {}
         if api_key:
             client_kwargs["api_key"] = api_key
