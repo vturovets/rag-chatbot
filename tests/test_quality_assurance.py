@@ -67,6 +67,34 @@ def test_audio_ingestion_and_retrieval(client, stub_transcription):
     assert "launch" in answer and "readiness" in answer
 
 
+def test_admin_purge_endpoint(client, stub_transcription):
+    from app.backend import config
+
+    with _open_fixture("sample_image_text.pdf") as stream:
+        upload_pdf = client.post(
+            "/upload/pdf",
+            files={"file": ("sample_image_text.pdf", stream, "application/pdf")},
+        )
+    assert upload_pdf.status_code == 200, upload_pdf.text
+
+    with _open_fixture("sample_clean.mp3") as stream:
+        upload_audio = client.post(
+            "/upload/audio",
+            files={"file": ("sample_clean.mp3", stream, "audio/mpeg")},
+        )
+    assert upload_audio.status_code == 200, upload_audio.text
+
+    storage_dir = config.get_settings().storage_dir
+    stored_items = list(storage_dir.iterdir())
+    assert stored_items, "Expected files to be stored before purge"
+
+    response = client.post("/admin/purge")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "purged"}
+
+    assert not list(storage_dir.iterdir()), "Expected storage directory to be empty after purge"
+
+
 def test_extraction_service_uses_rag_openai_key(monkeypatch):
     from app.backend import config
 
@@ -160,6 +188,11 @@ def test_debug_endpoint_requires_debug_mode(client, monkeypatch):
     payload = response.json()
     assert payload["error_code"] == "UNAUTHORIZED_DEBUG"
     assert "development mode" in payload["message"].lower()
+
+    purge_response = client.post("/admin/purge")
+    assert purge_response.status_code == 401
+    purge_payload = purge_response.json()
+    assert purge_payload["error_code"] == "UNAUTHORIZED_DEBUG"
 
 
 def test_debug_chunk_accepts_inline_text(client):

@@ -28,4 +28,10 @@ class HealthResponse(BaseModel):
     limits: HealthLimits | None = None
 
 
-__all__ = ["HealthLimits", "HealthResponse"]
+class PurgeResponse(BaseModel):
+    """Confirmation payload for data purge operations."""
+
+    status: Literal["purged"]
+
+
+__all__ = ["HealthLimits", "HealthResponse", "PurgeResponse"]

@@ -45,15 +45,21 @@ class VectorStore:
         self._collections: Dict[str, Collection] = {}
         self._dimensions: Dict[str, int] = {}
         self._memory_entries: Dict[str, Dict[UUID, tuple[Chunk, List[float]]]] = {}
+        self._persist_directory: Path | None = None
+        self._owns_client = False
 
         if self._use_in_memory:
             self._client = None
         elif client is not None:
             self._client = client
+            self._persist_directory = persist_directory
+            self._owns_client = False
         else:
-            persist_directory = persist_directory or self._default_persist_directory()
-            persist_directory.mkdir(parents=True, exist_ok=True)
-            self._client = self._create_client(persist_directory)
+            directory = persist_directory or self._default_persist_directory()
+            directory.mkdir(parents=True, exist_ok=True)
+            self._persist_directory = directory
+            self._client = self._create_client(directory)
+            self._owns_client = True
 
     def _default_persist_directory(self) -> Path:
         return self._settings.storage_dir / "chroma"
@@ -77,12 +83,23 @@ class VectorStore:
         safe = fingerprint.replace(":", "_").replace("/", "-")
         return f"rag_{safe}"
 
+    def _ensure_client(self) -> ClientAPI:
+        if self._use_in_memory:
+            raise RuntimeError("Vector store is operating in in-memory mode")
+        if self._client is None:
+            directory = self._persist_directory or self._default_persist_directory()
+            directory.mkdir(parents=True, exist_ok=True)
+            self._client = self._create_client(directory)
+            self._owns_client = True
+        return self._client
+
     def _get_collection(self, fingerprint: str, dimension: int) -> Collection:
         with self._lock:
             collection = self._collections.get(fingerprint)
             if collection is None:
+                client = self._ensure_client()
                 metadata = {"fingerprint": fingerprint, "dimension": str(dimension)}
-                collection = self._client.get_or_create_collection(
+                collection = client.get_or_create_collection(
                     name=self._collection_name(fingerprint),
                     metadata=metadata,
                 )
@@ -158,10 +175,13 @@ class VectorStore:
         collection: Collection | None = None
         if not self._use_in_memory:
             with self._lock:
+                client = self._client
+                if client is None:
+                    client = self._ensure_client()
                 collection = self._collections.get(fingerprint)
                 if collection is None:
                     try:
-                        collection = self._client.get_collection(name=self._collection_name(fingerprint))
+                        collection = client.get_collection(name=self._collection_name(fingerprint))
                     except ValueError:
                         return []
                     self._collections[fingerprint] = collection
@@ -233,8 +253,70 @@ class VectorStore:
             self._remove_in_memory(identifiers)
             return
         with self._lock:
+            client = self._client
+            if client is None:
+                client = self._ensure_client()
             for collection in self._collections.values():
                 collection.delete(where={"source_file_id": {"$in": identifiers}})
+
+    def reset(self) -> None:
+        """Remove all stored embeddings and reset caches."""
+
+        with self._lock:
+            if self._use_in_memory:
+                self._memory_entries.clear()
+                self._collections.clear()
+                self._dimensions.clear()
+                return
+
+            client = self._client
+            if client is not None:
+                try:
+                    collections = list(client.list_collections())
+                except Exception:
+                    collections = []
+            else:
+                collections = []
+
+            managed_collections = list(self._collections.values())
+            collections.extend(managed_collections)
+
+            seen: set[str | int] = set()
+            for collection in collections:
+                if collection is None:
+                    continue
+                identifier = getattr(collection, "name", None)
+                key = identifier if identifier is not None else id(collection)
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    if identifier and client is not None:
+                        try:
+                            client.delete_collection(name=identifier)
+                            continue
+                        except Exception:
+                            pass
+                    collection.delete(where={})
+                except Exception:
+                    continue
+
+            self._collections.clear()
+            self._dimensions.clear()
+            if client is not None:
+                try:
+                    client.reset()
+                except Exception:
+                    pass
+                try:
+                    system = getattr(client, "_system", None)
+                    stop = getattr(system, "stop", None)
+                    if callable(stop):
+                        stop()
+                except Exception:
+                    pass
+                if self._owns_client:
+                    self._client = None
 
     def _upsert_in_memory(
         self,
