@@ -9,7 +9,8 @@ from app.backend import exceptions
 from app.backend.config import Settings, get_settings
 from app.backend.models.chat import ChatRequest, ChatResponse, DebugPipelineRequest, DebugPipelineResponse
 from app.backend.models.ingestion import FileKind, UploadResponse
-from app.backend.models.status import HealthLimits, HealthResponse
+from app.backend.models.status import HealthLimits, HealthResponse, PurgeResponse
+from app.backend.services.lifecycle import BackendLifecycle
 from app.backend.services.pipeline import PipelineService
 from app.backend.services.session_store import SessionStore
 from app.backend.services.storage import FileStorage
@@ -33,7 +34,11 @@ def get_session_store() -> SessionStore:
 
 @lru_cache()
 def get_pipeline() -> PipelineService:
-    return PipelineService(storage=get_storage(), session_store=get_session_store())
+    return PipelineService(
+        storage=get_storage(),
+        session_store=get_session_store(),
+        lifecycle=BackendLifecycle(),
+    )
 
 
 def get_app_settings() -> Settings:
@@ -152,6 +157,17 @@ async def debug_pipeline(
     if not settings.debug_mode:
         raise exceptions.unauthorized_debug()
     return await pipeline.debug_pipeline(request, break_at, raw)
+
+
+@router.post("/admin/purge", response_model=PurgeResponse)
+async def purge_ingested_content(
+    pipeline: PipelineService = Depends(get_pipeline),
+    settings: Settings = Depends(get_app_settings),
+) -> PurgeResponse:
+    if not settings.debug_mode:
+        raise exceptions.unauthorized_debug()
+    pipeline.purge_all()
+    return PurgeResponse(status="purged")
 
 
 __all__ = ["router"]

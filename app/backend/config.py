@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     file_retention_hours: int = Field(24, ge=1, description="Hours to retain uploaded files")
     session_retention_hours: int = Field(24, ge=1, description="Hours to retain chat sessions")
 
+    auto_restart_on_purge: bool = Field(
+        True,
+        description="Automatically restart the backend process once a purge completes.",
+    )
+    restart_grace_seconds: float = Field(
+        0.5,
+        ge=0.0,
+        description="Delay before restarting after purge to allow responses to flush.",
+    )
+
     chunk_size: int = Field(500, ge=64, description="Token target per chunk")
     chunk_overlap: int = Field(60, ge=0, description="Token overlap between chunks")
     top_k: int = Field(5, ge=1, le=8, description="Default retrieval depth")

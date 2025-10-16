@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 
 from app.backend import exceptions
 from app.backend.services.extraction import ExtractionService, LocalTranscriber, OpenAIError
@@ -65,6 +66,66 @@ def test_audio_ingestion_and_retrieval(client, stub_transcription):
     assert chat_response.status_code == 200, chat_response.text
     answer = chat_response.json()["answer"].lower()
     assert "launch" in answer and "readiness" in answer
+
+
+def test_admin_purge_endpoint(client, stub_transcription):
+    from app.backend import config
+
+    with _open_fixture("sample_image_text.pdf") as stream:
+        upload_pdf = client.post(
+            "/upload/pdf",
+            files={"file": ("sample_image_text.pdf", stream, "application/pdf")},
+        )
+    assert upload_pdf.status_code == 200, upload_pdf.text
+
+    with _open_fixture("sample_clean.mp3") as stream:
+        upload_audio = client.post(
+            "/upload/audio",
+            files={"file": ("sample_clean.mp3", stream, "audio/mpeg")},
+        )
+    assert upload_audio.status_code == 200, upload_audio.text
+
+    storage_dir = config.get_settings().storage_dir
+    stored_items = list(storage_dir.iterdir())
+    assert stored_items, "Expected files to be stored before purge"
+
+    response = client.post("/admin/purge")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "purged"}
+
+    assert not list(storage_dir.iterdir()), "Expected storage directory to be empty after purge"
+
+
+def test_admin_purge_triggers_restart(monkeypatch):
+    from app.backend import config
+    from app.backend.api import routes
+    from app.backend.main import app
+    from app.backend.services import lifecycle
+
+    triggered: dict[str, object] = {}
+
+    def fake_schedule(self, delay: float, action):  # type: ignore[override]
+        triggered["called"] = True
+        triggered["delay"] = delay
+        triggered["action_callable"] = callable(action)
+        return None
+
+    monkeypatch.setenv("RAG_AUTO_RESTART_ON_PURGE", "true")
+    monkeypatch.setenv("RAG_RESTART_GRACE_SECONDS", "0")
+    monkeypatch.setattr(lifecycle.BackendLifecycle, "_schedule", fake_schedule)
+
+    config.get_settings.cache_clear()
+    routes.get_pipeline.cache_clear()
+    routes.get_storage.cache_clear()
+    routes.get_session_store.cache_clear()
+
+    with TestClient(app) as local_client:
+        response = local_client.post("/admin/purge")
+
+    assert response.status_code == 200, response.text
+    assert triggered.get("called") is True
+    assert triggered.get("action_callable") is True
+    assert triggered.get("delay") == pytest.approx(0.0)
 
 
 def test_extraction_service_uses_rag_openai_key(monkeypatch):
@@ -160,6 +221,11 @@ def test_debug_endpoint_requires_debug_mode(client, monkeypatch):
     payload = response.json()
     assert payload["error_code"] == "UNAUTHORIZED_DEBUG"
     assert "development mode" in payload["message"].lower()
+
+    purge_response = client.post("/admin/purge")
+    assert purge_response.status_code == 401
+    purge_payload = purge_response.json()
+    assert purge_payload["error_code"] == "UNAUTHORIZED_DEBUG"
 
 
 def test_debug_chunk_accepts_inline_text(client):

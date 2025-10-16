@@ -49,5 +49,10 @@ class SessionStore:
         context.touch()
         return context
 
+    def clear(self) -> None:
+        """Remove all tracked sessions."""
+
+        self._sessions.clear()
+
 
 __all__ = ["SessionStore"]
