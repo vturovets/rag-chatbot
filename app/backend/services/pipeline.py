@@ -69,8 +69,8 @@ class PipelineService:
     def purge_all(self) -> None:
         """Remove all persisted artifacts across storage and retrieval layers."""
 
-        self._storage.purge_all()
         self._vector_store.reset()
+        self._storage.purge_all()
         self._sessions.clear()
 
     async def handle_pdf_upload(self, file_id: UUID) -> ExtractionResult:
