@@ -236,6 +236,55 @@ class VectorStore:
             for collection in self._collections.values():
                 collection.delete(where={"source_file_id": {"$in": identifiers}})
 
+    def reset(self) -> None:
+        """Remove all stored embeddings and reset caches."""
+
+        with self._lock:
+            if self._use_in_memory:
+                self._memory_entries.clear()
+                self._collections.clear()
+                self._dimensions.clear()
+                return
+
+            if self._client is not None:
+                try:
+                    collections = list(self._client.list_collections())
+                except Exception:
+                    collections = []
+            else:
+                collections = []
+
+            managed_collections = list(self._collections.values())
+            collections.extend(managed_collections)
+
+            seen: set[str | int] = set()
+            for collection in collections:
+                if collection is None:
+                    continue
+                identifier = getattr(collection, "name", None)
+                key = identifier if identifier is not None else id(collection)
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    if identifier and self._client is not None:
+                        try:
+                            self._client.delete_collection(name=identifier)
+                            continue
+                        except Exception:
+                            pass
+                    collection.delete(where={})
+                except Exception:
+                    continue
+
+            self._collections.clear()
+            self._dimensions.clear()
+            if self._client is not None:
+                try:
+                    self._client.reset()
+                except Exception:
+                    pass
+
     def _upsert_in_memory(
         self,
         fingerprint: str,
