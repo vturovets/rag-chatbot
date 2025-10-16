@@ -10,6 +10,7 @@ from app.backend.config import Settings, get_settings
 from app.backend.models.chat import ChatRequest, ChatResponse, DebugPipelineRequest, DebugPipelineResponse
 from app.backend.models.ingestion import FileKind, UploadResponse
 from app.backend.models.status import HealthLimits, HealthResponse, PurgeResponse
+from app.backend.services.lifecycle import BackendLifecycle
 from app.backend.services.pipeline import PipelineService
 from app.backend.services.session_store import SessionStore
 from app.backend.services.storage import FileStorage
@@ -33,7 +34,11 @@ def get_session_store() -> SessionStore:
 
 @lru_cache()
 def get_pipeline() -> PipelineService:
-    return PipelineService(storage=get_storage(), session_store=get_session_store())
+    return PipelineService(
+        storage=get_storage(),
+        session_store=get_session_store(),
+        lifecycle=BackendLifecycle(),
+    )
 
 
 def get_app_settings() -> Settings:

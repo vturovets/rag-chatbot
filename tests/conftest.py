@@ -20,6 +20,7 @@ def _reset_settings(monkeypatch, tmp_path):
     monkeypatch.setenv("RAG_STORAGE_DIR", str(storage_root))
     monkeypatch.setenv("RAG_ENVIRONMENT", "dev")
     monkeypatch.setenv("RAG_DEBUG_MODE", "true")
+    monkeypatch.setenv("RAG_AUTO_RESTART_ON_PURGE", "false")
 
     config.get_settings.cache_clear()
     routes.get_pipeline.cache_clear()

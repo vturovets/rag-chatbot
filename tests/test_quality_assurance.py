@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 
 from app.backend import exceptions
 from app.backend.services.extraction import ExtractionService, LocalTranscriber, OpenAIError
@@ -93,6 +94,38 @@ def test_admin_purge_endpoint(client, stub_transcription):
     assert response.json() == {"status": "purged"}
 
     assert not list(storage_dir.iterdir()), "Expected storage directory to be empty after purge"
+
+
+def test_admin_purge_triggers_restart(monkeypatch):
+    from app.backend import config
+    from app.backend.api import routes
+    from app.backend.main import app
+    from app.backend.services import lifecycle
+
+    triggered: dict[str, object] = {}
+
+    def fake_schedule(self, delay: float, action):  # type: ignore[override]
+        triggered["called"] = True
+        triggered["delay"] = delay
+        triggered["action_callable"] = callable(action)
+        return None
+
+    monkeypatch.setenv("RAG_AUTO_RESTART_ON_PURGE", "true")
+    monkeypatch.setenv("RAG_RESTART_GRACE_SECONDS", "0")
+    monkeypatch.setattr(lifecycle.BackendLifecycle, "_schedule", fake_schedule)
+
+    config.get_settings.cache_clear()
+    routes.get_pipeline.cache_clear()
+    routes.get_storage.cache_clear()
+    routes.get_session_store.cache_clear()
+
+    with TestClient(app) as local_client:
+        response = local_client.post("/admin/purge")
+
+    assert response.status_code == 200, response.text
+    assert triggered.get("called") is True
+    assert triggered.get("action_callable") is True
+    assert triggered.get("delay") == pytest.approx(0.0)
 
 
 def test_extraction_service_uses_rag_openai_key(monkeypatch):

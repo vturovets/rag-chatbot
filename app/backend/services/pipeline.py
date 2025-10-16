@@ -36,6 +36,7 @@ from app.backend.services.generation import (
     ProviderUnavailableError,
     RateLimitedError,
 )
+from app.backend.services.lifecycle import BackendLifecycle
 from app.backend.services.session_store import SessionStore
 from app.backend.services.storage import FileStorage
 from app.backend.services.vector_store import VectorStore
@@ -56,6 +57,7 @@ class PipelineService:
         embeddings: EmbeddingService | None = None,
         vector_store: VectorStore | None = None,
         session_store: SessionStore | None = None,
+        lifecycle: BackendLifecycle | None = None,
         generation: GenerationService | None = None,
     ) -> None:
         self._settings = get_settings()
@@ -64,6 +66,7 @@ class PipelineService:
         self._embeddings = embeddings or EmbeddingService()
         self._vector_store = vector_store or VectorStore(self._embeddings)
         self._sessions = session_store or SessionStore()
+        self._lifecycle = lifecycle or BackendLifecycle()
         self._generation = generation or GenerationService()
 
     def purge_all(self) -> None:
@@ -72,6 +75,7 @@ class PipelineService:
         self._vector_store.reset()
         self._storage.purge_all()
         self._sessions.clear()
+        self._lifecycle.schedule_restart()
 
     async def handle_pdf_upload(self, file_id: UUID) -> ExtractionResult:
         overall_start = time.perf_counter()
