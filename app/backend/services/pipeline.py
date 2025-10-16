@@ -66,6 +66,13 @@ class PipelineService:
         self._sessions = session_store or SessionStore()
         self._generation = generation or GenerationService()
 
+    def purge_all(self) -> None:
+        """Remove all persisted artifacts across storage and retrieval layers."""
+
+        self._storage.purge_all()
+        self._vector_store.reset()
+        self._sessions.clear()
+
     async def handle_pdf_upload(self, file_id: UUID) -> ExtractionResult:
         overall_start = time.perf_counter()
         extraction_start = time.perf_counter()

@@ -1,6 +1,7 @@
 """File storage and session persistence utilities."""
 from __future__ import annotations
 
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict
@@ -126,6 +127,19 @@ class FileStorage:
         except FileNotFoundError:
             pass
         self._registry.pop(file_id, None)
+
+    def purge_all(self) -> None:
+        """Remove all stored files and associated metadata."""
+
+        for path in self.storage_dir.iterdir():
+            try:
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+                elif path.is_dir():
+                    shutil.rmtree(path)
+            except FileNotFoundError:
+                continue
+        self._registry.clear()
 
 
 __all__ = ["FileStorage"]
