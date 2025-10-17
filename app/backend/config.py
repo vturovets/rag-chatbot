@@ -82,8 +82,8 @@ class Settings(BaseSettings):
         description="Delay before restarting after purge to allow responses to flush.",
     )
 
-    chunk_size: int = Field(500, ge=64, description="Token target per chunk")
-    chunk_overlap: int = Field(60, ge=0, description="Token overlap between chunks")
+    chunk_size: int = Field(1000, ge=64, description="Token target per chunk")
+    chunk_overlap: int = Field(100, ge=0, description="Token overlap between chunks")
     top_k: int = Field(5, ge=1, le=8, description="Default retrieval depth")
 
     max_upload_mb: int = Field(200, ge=1, description="Maximum upload size")

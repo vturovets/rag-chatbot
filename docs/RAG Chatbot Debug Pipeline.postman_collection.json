@@ -77,15 +77,62 @@
 					"listen": "test",
 					"script": {
 						"exec": [
-							"if (pm.response.code === 200) {",
-							"  const data = pm.response.json();",
-							"  if (data.text) {",
-							"    pm.collectionVariables.set('extracted_text_json', JSON.stringify(data.text));",
-							"  }",
-							"  if (typeof data.pages !== 'undefined') {",
-							"    pm.collectionVariables.set('extracted_pages', data.pages);",
-							"  }",
-							"}"
+							"// Parse JSON safely",
+							"let data = {};",
+							"try { data = pm.response.json(); } catch (e) { data = {}; }",
+							"",
+							"// Find the \"extract\" stage in a pipeline response",
+							"const stages = Array.isArray(data?.stages) ? data.stages : [];",
+							"const extract = stages.find(s =>",
+							"  (s?.stage || s?.name || \"\").toString().toLowerCase() === \"extract\"",
+							") || {};",
+							"",
+							"// The payload we want",
+							"const out = extract.output_payload || {};",
+							"",
+							"// Pull fields (backend may return text/pages inside output_payload)",
+							"// Now with text_preview fallback",
+							"const text =",
+							"  out.text ??",
+							"  out.content?.text ??",
+							"  out.text_joined ??",
+							"  out.text_preview; // <-- added fallback",
+							"",
+							"const pages = out.pages ?? out.meta?.pages;",
+							"",
+							"// Store as **collection** variables for later requests",
+							"if (typeof text !== \"undefined\") {",
+							"  const asString = typeof text === \"string\" ? text : JSON.stringify(text);",
+							"  pm.collectionVariables.set(\"extracted_text_json\", JSON.stringify(asString));",
+							"  console.log(\"extracted_text_json set (len):\", String(asString).length);",
+							"} else {",
+							"  pm.collectionVariables.unset(\"extracted_text_json\");",
+							"  console.log(\"extracted_text_json: not present in extract.output_payload\");",
+							"}",
+							"",
+							"if (typeof pages !== \"undefined\") {",
+							"  pm.collectionVariables.set(\"extracted_pages\", String(pages));",
+							"  console.log(\"extracted_pages set:\", String(pages));",
+							"} else {",
+							"  pm.collectionVariables.unset(\"extracted_pages\");",
+							"  console.log(\"extracted_pages: not present in extract.output_payload\");",
+							"}",
+							"",
+							"// Helpful diagnostics",
+							"console.log(\"stages:\", stages.map(s => s.stage || s.name));",
+							"console.log(\"extract keys:\", Object.keys(out));",
+							""
+						],
+						"type": "text/javascript",
+						"packages": {},
+						"requests": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							""
 						],
 						"type": "text/javascript",
 						"packages": {},
@@ -447,6 +494,52 @@
 				}
 			},
 			"response": []
+		},
+		{
+			"name": "Admin Purge",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"if (!pm.collectionVariables.get('context_payload')) {",
+							"  throw new Error('Missing context_payload collection variable. Run the chunk stage first.');",
+							"}"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"query\": \"{{sample_query}}\",\n  \"context\": {{context_payload}}\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/debug/pipeline?break_at=generate",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"debug",
+						"pipeline"
+					],
+					"query": [
+						{
+							"key": "break_at",
+							"value": "generate"
+						}
+					]
+				}
+			},
+			"response": []
 		}
 	],
 	"event": [
@@ -499,10 +592,6 @@
 			"value": "94477ab1-7b65-46f5-a972-6176c640c930"
 		},
 		{
-			"key": "extracted_text_json",
-			"value": ""
-		},
-		{
 			"key": "extracted_pages",
 			"value": ""
 		},
@@ -520,6 +609,10 @@
 		},
 		{
 			"key": "audio_file_id",
+			"value": ""
+		},
+		{
+			"key": "extracted_text_json",
 			"value": ""
 		}
 	]
