@@ -1,211 +1,290 @@
-Absolutely ✅ — here’s the **updated version of the “RAG Chatbot SRS (Codex Edition)”** that now includes a structured **Error Handling and Messages** section (Section 9).  
-I’ve kept the messages consistent with REST conventions and informative for both developers (in logs/debug) and users (in Streamlit UI).  
-All previous content is preserved and aligned with your latest agreements.
+# RAG Chatbot SRS (Implementation Snapshot)
+
+This specification describes the delivered RAG Chatbot system as implemented in the
+`rag-chatbot` repository. It captures the architecture, functional scope, configuration, and
+operational behaviour of the FastAPI backend and Streamlit frontend that jointly provide the
+retrieval‑augmented experience.
 
 ---
-
-# **RAG Chatbot SRS (Codex Edition)**
 
 ## 1. Purpose and Context
 
-The project delivers a **Retrieval-Augmented Generation (RAG) chatbot** that ingests **PDF presentations** and **audio recordings** to create a searchable knowledge base.  
-It combines **retrieval** from a vector database with **generation** via a large language model (LLM), returning concise, contextually grounded answers.  
-Target implementation: FastAPI backend + Streamlit UI (2 tabs: *Ingest* / *Chat*).
+- Provide an internal assistant that answers questions grounded in uploaded slide decks (PDF) and
+  recorded briefings (MP3).
+- Support hybrid ingestion, retrieval, and generation while maintaining deterministic fallbacks so
+  the product remains usable in constrained environments.
+- Offer development tooling (debug pipeline, admin purge, structured logs) to aid operations and
+  incident response.
 
 ---
 
-## 2. Business Value
+## 2. System Overview
 
-| Objective                      | Business Value                                                        |
-| ------------------------------ | --------------------------------------------------------------------- |
-| Centralized knowledge access   | Unified conversational access to information from PDFs and MP3 files. |
-| Reduced manual effort          | Automated extraction and transcription of documents and recordings.   |
-| Improved knowledge utilization | Converts static files into a dynamic, queryable knowledge base.       |
-| Scalable knowledge management  | Designed for multi-session operation and future extensibility.        |
-| Enhanced decision-making       | Provides fast, contextually grounded responses.                       |
-
----
-
-## 3. Roles and Responsibilities
-
-| Role                                 | Responsibilities                                                               |
-| ------------------------------------ | ------------------------------------------------------------------------------ |
-| System Administrator / Data Engineer | Configure and maintain ingestion pipelines (PDF parsing, audio transcription). |
-| ML Engineer                          | Implement chunking, embedding, and vector storage logic.                       |
-| Backend Developer                    | Build and maintain API endpoints for ingestion, retrieval, and generation.     |
-| Frontend Developer                   | Develop Streamlit interface (2 tabs, ephemeral sessions).                      |
-| QA / Tester                          | Validate ingestion, retrieval, generation, and debug pipelines.                |
-| End User                             | Upload files and query chatbot through web UI.                                 |
+| Component | Description |
+| --------- | ----------- |
+| FastAPI backend (`app/backend`) | Exposes REST endpoints, orchestrates the ingestion and chat pipeline, enforces limits, and translates provider failures into first-class errors. |
+| Extraction service | Uses PyMuPDF + pdfplumber to read PDFs and OpenAI Whisper (with optional `faster-whisper` fallback) to transcribe MP3 audio. |
+| Chunking + embeddings | Normalises text via `chunk_text`, generates embeddings through OpenAI or Google providers, and falls back to deterministic hashing when APIs are unreachable. |
+| Vector store | Persists embeddings in ChromaDB keyed by provider/model fingerprint; provides in-memory storage when Chroma is not installed. |
+| Generation service | Calls OpenAI or Google chat models with retry/backoff and degrades to a deterministic summariser when external providers are unavailable. |
+| Session store | Tracks uploaded file associations per chat session with 24 h retention. |
+| Streamlit frontend (`app/frontend`) | Presents ingestion and chat tabs, surfaces request progress, displays retention windows, and maps error codes to friendly copy. |
+| Storage directory (`storage/`) | Retains uploads, extracted metadata (`*.json`), and ChromaDB persistence, auto-purged after retention expires. |
 
 ---
 
-## 4. Functional Overview
+## 3. Actors and Responsibilities
 
-### Workflow
-
-1. **Upload Source Data** – User uploads `.pdf` or `.mp3` file.
-
-2. **Extraction / Transcription** – System extracts text (PDF) or transcribes audio (Whisper).
-
-3. **Chunking** – Text split into semantic units; token-based (size ≤ 500, overlap ≈ 60).
-
-4. **Embedding Generation** – Chunks converted to embeddings (OpenAI or Google).
-
-5. **Vector Storage** – Embeddings stored in **ChromaDB**, metric = cosine.
-
-6. **User Query** – User enters a natural-language question.
-
-7. **Context Retrieval** – Query embedded and matched to relevant chunks (`top_k = 5`).
-
-8. **Answer Generation** – Retrieved chunks + query → LLM (OpenAI or Google) → concise answer.
-
-9. **Delivery** – Answer returned without visible citations/snippets.
+| Actor | Responsibilities |
+| ----- | ---------------- |
+| End user | Upload PDFs/MP3s, initiate chat sessions, review answers via the Streamlit UI. |
+| Backend developer | Maintain FastAPI routes, pipeline orchestration, and error translation. |
+| ML engineer | Tune chunking/embedding configuration, manage provider selection, validate retrieval quality. |
+| Data/Platform engineer | Provision API keys, manage storage volume, monitor logs, and coordinate restarts triggered by purge actions. |
+| QA engineer | Execute automated and manual regression tests using the fixtures and Postman collection. |
 
 ---
 
-## 5. Functional and Non-Functional Requirements
+## 4. Functional Requirements
 
-### Functional
+### 4.1 File ingestion
+- Accept uploads through `/upload/pdf` and `/upload/audio` with multipart form payloads.
+- Validate MIME type or file extension (`.pdf`, `.mp3`). Reject image-only PDFs (`INVALID_PDF_STRUCTURE`) and non‑MP3 audio (`INVALID_FILE_TYPE`).
+- Enforce size and duration limits (`RAG_MAX_UPLOAD_MB`, `RAG_MAX_PDF_PAGES`, `RAG_MAX_AUDIO_MINUTES`). Default audio limit is 90 minutes; exceeding it returns `AUDIO_TOO_LONG`.
+- Persist the raw file and metadata JSON under `storage/<uuid>`; set `expires_at = uploaded_at + file_retention_hours` (24 h default).
+- Return `UploadResponse` including `file_id`, derived `source`, and session association.
 
-| Module                  | Requirement                                                          |
-| ----------------------- | -------------------------------------------------------------------- |
-| **Data Loader**         | Accepts `.pdf` and `.mp3` (reject image-only PDFs / other audio).    |
-| **Text Extractor**      | Use `PyMuPDF` or `pdfplumber` for text-layer extraction.             |
-| **Audio Transcriber**   | Use OpenAI Whisper API (large-v3).                                   |
-| **Chunking Engine**     | Token-based with 10–20 % overlap (default 500 ± 60 tokens).          |
-| **Embedding Generator** | Uses OpenAI or Google model; configurable per environment.           |
-| **Vector DB**           | ChromaDB only; “index fingerprint = provider + model” enforced.      |
-| **Retriever**           | Semantic similarity search (`k ≤ 8`, default 5).                     |
-| **Generator**           | OpenAI/Google LLM; concise, neutral answers, no citations shown.     |
-| **Frontend (UI)**       | Streamlit 2-tab app (Ingest, Chat); ephemeral 24 h retention banner. |
-| **Backend (API)**       | FastAPI service exposing upload, chat, and debug endpoints.          |
+### 4.2 Extraction and transcription
+- PDFs: use PyMuPDF (`fitz`) to iterate pages, supplement with pdfplumber for resilience, and combine page text. Abort if the concatenated text is empty.
+- Audio: use `mutagen` to inspect MP3 metadata, validate duration, then call OpenAI Whisper via `AsyncOpenAI.audio.transcriptions.create` (text response). Retry with exponential backoff on rate limits, and fall back to local transcription when configured.
+- Local transcription: convert MP3 to 16 kHz mono WAV via `ffmpeg`, run `faster-whisper` using configured device/compute type, and clean up temporary files.
 
-### Non-Functional
+### 4.3 Chunking and embeddings
+- Normalise whitespace and chunk text using `ChunkConfig(chunk_size=500, chunk_overlap=60)` with a tokenizer that prefers `tiktoken` and falls back to whitespace tokenisation.
+- Wrap chunks as `Chunk` objects (tracking `chunk_id`, source file, order).
+- Generate embeddings using the configured provider:
+  - **OpenAI**: `text-embedding-3-large` by default, with retry/backoff on rate limits and provider errors.
+  - **Google Generative AI**: calls `genai.embed_content` when configured.
+  - **Fallback**: deterministic SHA-256 hash mapped to a unit vector (ensures deterministic behaviour offline).
+- Persist embeddings to the vector store via `VectorStore.upsert_vectors`, storing metadata (source file, order, provider fingerprint).
 
-| Category            | Requirement                                                  |
-| ------------------- | ------------------------------------------------------------ |
-| **Performance**     | Total query latency ≤ 15 s.                                  |
-| **Scalability**     | Handles multiple concurrent chat sessions.                   |
-| **Reliability**     | Stable under multi-session load.                             |
-| **Maintainability** | Configurable chunk size, model provider, limits.             |
-| **Usability**       | Simple Streamlit interface; clear validation/error messages. |
-| **Security**        | Debug endpoints only available in DEV (`DEBUG_MODE = True`). |
+### 4.4 Retrieval and ranking
+- When `/chat` is invoked, retrieve the session context (`SessionStore`). Reject empty queries (`MISSING_QUERY`).
+- Determine retrieval plan based on `_route_query_sources` keywords to balance PDF vs audio sources.
+- Perform similarity search through ChromaDB with optional source filtering and deduplicate chunk hits.
+- Limit retrieval depth to `top_k ≤ 8`; fallback to global search if routed hits are empty.
+- Record precision sample metrics and latency breakdown in structured logs.
+
+### 4.5 Prompting and generation
+- Assemble prompts by flattening retrieved chunks (max 8) into a bullet list. When no context exists, instruct the LLM to acknowledge the lack of evidence.
+- Generate answers via provider-specific adapters:
+  - Retry/backoff on rate limits and transient connectivity problems.
+  - Enforce per-stage timeouts using configuration (`retrieval_timeout_s`, `prompt_timeout_s`, `generation_timeout_s`).
+  - Map provider exceptions to domain errors (`RATE_LIMIT_EXCEEDED`, `LLM_PROVIDER_DOWN`, `GENERATION_TIMEOUT`, etc.).
+- Ensure responses are concise (≤3 sentences) and citation-free. Return `ChatResponse` with `answer`, `latency_ms`, and `session_id` (to maintain continuity across UI refreshes).
+- Fall back to `LocalFallbackProvider` that summarises available snippets if remote providers fail.
+
+### 4.6 Session and retention management
+- `SessionStore` associates uploaded file IDs with a session UUID (provided by client or generated server-side).
+- Sessions expire after `session_retention_hours` (24 h default) and are lazily purged before use.
+- Successful chat responses append newly retrieved file IDs to the session context.
+
+### 4.7 Debugging and administration
+- `/debug/pipeline` (debug mode only) replays the pipeline stage-by-stage (`extract → chunk → embed → retrieve → generate`), returning diagnostics for each step. Accepts inline chunks to bypass extraction and optionally emits raw payloads when `raw=true`.
+- `/admin/purge` (debug mode only) clears stored files, vector index, and session cache, then invokes `BackendLifecycle.schedule_restart()` when `RAG_AUTO_RESTART_ON_PURGE=true`.
+
+### 4.8 Frontend behaviour
+- Streamlit app provides tabs for **Ingest** (file uploader, status indicator, retention summary) and **Chat** (question input, streaming progress messages, answer display, history of ingested items).
+- Friendly messages map backend error codes to user-facing copy; technical details and HTTP metadata are surfaced only when `st.secrets["debug_mode"]` is true.
+- UI stores ingested file records in Streamlit session state to support subsequent chats without re-uploading within the retention window.
+
+---
+
+## 5. Non-Functional Requirements
+
+| Category | Requirement |
+| -------- | ----------- |
+| Performance | End-to-end chat latency must remain under 15 seconds (validated in tests). Per-stage timeouts configurable via settings. |
+| Scalability | Concurrent requests supported through async FastAPI handlers and thread executors for CPU-bound work. Vector store operations guarded by re-entrant locks. |
+| Reliability | Deterministic fallbacks for embeddings and generation maintain baseline functionality when providers are unavailable. File/session retention automatically purges stale artefacts. |
+| Observability | Structured JSON logs (`json_log`) emit ingestion counts, timings, and precision metrics. Request ID middleware injects `X-Request-ID` into all responses. |
+| Security | Debug endpoints require `RAG_DEBUG_MODE=true` and should be disabled in production. Upload validation prevents unsupported file types and oversize payloads. |
+| Maintainability | Configuration centralised in `Settings` (Pydantic), with `.env` support and caching. Services designed for dependency injection to enable testing and overrides. |
 
 ---
 
 ## 6. Configuration and Limits
 
-| Parameter         | Default                                              | Description                   |
-| ----------------- | ---------------------------------------------------- | ----------------------------- |
-| `CHUNK_SIZE`      | 500                                                  | Tokens per chunk.             |
-| `CHUNK_OVERLAP`   | 60                                                   | Token overlap between chunks. |
-| `LLM_PROVIDER`    | OpenAI                                               | Options: OpenAI, Google.      |
-| `EMBEDDING_MODEL` | `text-embedding-3-large`                             | Default embedding model.      |
-| `VECTOR_DB`       | ChromaDB                                             | Fixed option.                 |
-| `TOP_K`           | 5                                                    | Retrieved context items.      |
-| `MAX_UPLOAD_MB`   | 200                                                  | Max file size.                |
-| `MAX_PDF_PAGES`   | 200                                                  | Page limit per PDF.           |
-| `MAX_AUDIO_MIN`   | 60                                                   | Max audio length (minutes).   |
-| `TIMEOUTS`        | extract 5 s / transcribe 8 s / retrieve+generate 6 s | Stage timeouts.               |
+| Setting | Default | Description |
+| ------- | ------- | ----------- |
+| `environment` | `dev` | Runtime environment label. |
+| `debug_mode` | `True` | Enables debug endpoints and richer validation hints. |
+| `storage_dir` | `storage` | Location for uploads, metadata, and Chroma persistence. |
+| `file_retention_hours` | `24` | Hours to retain uploaded files before expiry. |
+| `session_retention_hours` | `24` | Hours to retain session context. |
+| `chunk_size` | `500` | Target tokens per chunk. |
+| `chunk_overlap` | `60` | Token overlap between consecutive chunks. |
+| `top_k` | `5` | Default retrieval depth (capped at 8). |
+| `max_upload_mb` | `200` | Maximum upload size in megabytes. |
+| `max_pdf_pages` | `200` | Maximum allowed pages per PDF. |
+| `max_audio_minutes` | `90` | Maximum MP3 duration accepted for transcription. |
+| `llm_provider` | `openai` | Generation provider (`openai` / `google`). |
+| `llm_model` | `gpt-4o-mini` | Chat model identifier. |
+| `embedding_model` | `text-embedding-3-large` | Embedding model identifier. |
+| `whisper_model` | `gpt-4o-mini-transcribe` | Whisper transcription model for audio ingestion. |
+| `retrieval_timeout_s` | `5.0` | Timeout for similarity search. |
+| `prompt_timeout_s` | `5.0` | Timeout for prompt assembly. |
+| `generation_timeout_s` | `30.0` | Timeout for LLM generation. |
+| `transcription_timeout_s` | `600.0` | Timeout for audio transcription (remote or local). |
+| `auto_restart_on_purge` | `True` | Whether to restart backend after purge completes. |
+| `restart_grace_seconds` | `0.5` | Delay before executing restart action. |
+
+All settings are exposed via environment variables prefixed with `RAG_` and load from `.env` when present.
 
 ---
 
-## 7. API and Debug Interfaces
+## 7. API Contract Summary
 
-**Base URL:** `http://localhost:8000`  
-**Environment guard:** active only if `DEBUG_MODE=True`.
+### 7.1 `GET /health`
+- **Query params**: `raw` (bool, default `false`) to include configuration limits (requires debug mode).
+- **Response**:
+  ```json
+  {
+    "status": "ok",
+    "provider": "OpenAI",
+    "vector_db": "ChromaDB",
+    "environment": "dev",
+    "debug_mode": true,
+    "limits": {
+      "chunk_size": 500,
+      "chunk_overlap": 60,
+      "top_k": 5,
+      "max_upload_mb": 200,
+      "max_pdf_pages": 200,
+      "max_audio_minutes": 90
+    }
+  }
+  ```
 
-### 7.1 Health
+### 7.2 `POST /upload/pdf`
+- **Request**: multipart form with `file` (PDF) and optional `session_id` (UUID string).
+- **Response**: `UploadResponse`
+  ```json
+  {
+    "file_id": "...",
+    "filename": "slides.pdf",
+    "kind": "pdf",
+    "source": "pdf",
+    "page_count": 12,
+    "expires_at": "2024-07-01T18:23:45.000Z",
+    "session_id": "..."
+  }
+  ```
 
-`GET /health` → `{ "status": "ok", "provider": "OpenAI", "vector_db": "ChromaDB" }`
+### 7.3 `POST /upload/audio`
+- **Request**: multipart form with MP3 `file` and optional `session_id`.
+- **Response**: `UploadResponse`
+  ```json
+  {
+    "file_id": "...",
+    "filename": "briefing.mp3",
+    "kind": "audio",
+    "source": "audio",
+    "duration_seconds": 354.2,
+    "expires_at": "2024-07-01T18:23:45.000Z",
+    "session_id": "..."
+  }
+  ```
 
-### 7.2 Upload
+### 7.4 `POST /chat`
+- **Request body**: `{"query": "string", "session_id": "optional UUID", "top_k": optional int}`.
+- **Response**:
+  ```json
+  {
+    "answer": "Concise answer grounded in the retrieved context.",
+    "latency_ms": 3120,
+    "session_id": "..."
+  }
+  ```
 
-| Endpoint        | Method | Description                                      |
-| --------------- | ------ | ------------------------------------------------ |
-| `/upload/pdf`   | `POST` | Accept text-layer PDF. Reject image-only PDFs.   |
-| `/upload/audio` | `POST` | Accept MP3 only (English Whisper transcription). |
+### 7.5 `POST /debug/pipeline`
+- **Guard**: requires `RAG_DEBUG_MODE=true`.
+- **Request body**: `DebugPipelineRequest` supporting either `file_id` or inline `text/chunks` payloads. Query params: `break_at` (`extract|chunk|embed|retrieve|generate`), `raw` (bool).
+- **Response**: `DebugPipelineResponse` containing a list of `PipelineStageDiagnostics` entries with `stage`, `input_payload`, and `output_payload` (optionally raw vectors).
 
-### 7.3 Chat
-
-`POST /chat`  
-**Body:** `{ "query": "string" }`  
-**Response:** `{ "answer": "string", "latency_ms": n }`
-
-### 7.4 Debug Pipeline (DEV only)
-
-`POST /debug/pipeline?break_at=<stage>`  
-Stages: `extract | chunk | embed | retrieve | generate`
-
-| Stage             | Input                                                        | Output                                                              |
-| ----------------- | ------------------------------------------------------------ | ------------------------------------------------------------------- |
-| `extract`         | `{ "file_id":"UUID", "file_type":"pdf" }`                    | `{ "text":"...", "pages":12 }`                                      |
-| `extract (audio)` | `{ "file_id":"UUID", "file_type":"audio", "language":"en" }` | `{ "transcript":"..." }`                                            |
-| `chunk`           | `{ "text":"...", "chunk_size":500, "overlap":60 }`           | `{ "chunks":[...], "counts":{...} }`                                |
-| `embed`           | `{ "chunks":[{"id":"c1","text":"..."}] }`                    | `{ "vectors":{ "count":N,"dim":1536 }, "index_fingerprint":"..." }` |
-| `retrieve`        | `{ "query":"...", "top_k":5 }`                               | `{ "hits":[{"id":"c1","score":0.78},...] }`                         |
-| `generate`        | `{ "query":"...", "context":["chunk1","chunk2"] }`           | `{ "prompt":"...", "answer":"..." }`                                |
-
-All responses omit raw vectors by default (`?raw=true` for dev only).
-
-**Fixtures:**
-
-- `fixtures/sample_image_text.pdf`, `fixtures/sample_image.pdf` (negative test)
-
-- `fixtures/sample_clean.mp3`  
-  **Postman Collection:** `/docs/debug-collection.json`
+### 7.6 `POST /admin/purge`
+- **Guard**: requires `RAG_DEBUG_MODE=true`.
+- **Response**: `{ "status": "purged" }`. When `auto_restart_on_purge` is true, schedules an application restart after `restart_grace_seconds`.
 
 ---
 
-## 8. Operational Notes
+## 8. Data Management
 
-1. **UI framework:** Streamlit (2 tabs: Ingest, Chat).
-
-2. **Provider defaults:** OpenAI embeddings + OpenAI LLM.
-
-3. **Index isolation:** enforce `index_fingerprint = provider + model`; block cross-use.
-
-4. **OCR:** Not supported (text-layer PDFs only).
-
-5. **Audio:** MP3 only; prefer better quality even if slower (< 15 s).
-
-6. **Telemetry:** local JSON logs with ingestion time, chunk/embedding counts, latency breakdown, precision@K spot checks.
-
-7. **Rate limits:** environment-level guardrails with exponential backoff.
-
-8. **Session management:** ephemeral Streamlit session state (auto-purge ≤ 24 h).
-
-9. **Testing fixtures:** sample PDF + MP3 for automated end-to-end tests (latency ≤ 15 s).
-
-10. **Prompt tone:** concise, professional, no explicit citations.
+- **Storage layout**: each upload stored at `storage/<uuid>` with metadata at `storage/<uuid>.json`.
+- **Vector persistence**: ChromaDB collections stored under `storage/chroma/` using fingerprint-based names (provider + embedding model). When Chroma is unavailable the store operates in-memory.
+- **Retention**: `FileStorage` and `SessionStore` lazily purge expired artefacts on each operation. `/admin/purge` forces immediate cleanup.
+- **Security considerations**: uploads are not encrypted at rest; restrict filesystem permissions and ensure the storage directory is not world-readable in production.
 
 ---
 
-## 9. Error Handling and Messages
+## 9. Logging, Monitoring, and Error Handling
 
-All errors follow JSON format:  
-`{ "error_code": "string", "message": "human-readable explanation", "hint": "optional" }`
+- **Request tracing**: `RequestIDMiddleware` injects a UUID as `X-Request-ID`; value is reused if the client supplies one.
+- **Structured logging**: `json_log` helper emits events such as `ingestion.complete` and `chat.completed` with counts, timings, provider info, and precision samples.
+- **Error payload format**:
+  ```json
+  {
+    "error_code": "STRING",
+    "message": "Human readable description",
+    "hint": "Optional developer hint"
+  }
+  ```
+- **Standard error catalogue**:
 
-| HTTP Code | Error Code              | Message (User-Facing)                                       | Typical Cause / Notes                      |
-| --------- | ----------------------- | ----------------------------------------------------------- | ------------------------------------------ |
-| **400**   | `INVALID_FILE_TYPE`     | “Unsupported file format. Please upload a PDF or MP3 file.” | Wrong extension or MIME type.              |
-| **400**   | `INVALID_PDF_STRUCTURE` | “This PDF contains no text layer and cannot be processed.”  | Image-only PDF rejected.                   |
-| **400**   | `FILE_TOO_LARGE`        | “File exceeds size limit (200 MB).”                         | Enforced by config.                        |
-| **400**   | `AUDIO_TOO_LONG`        | “Audio exceeds 60-minute limit.”                            | Duration validation.                       |
-| **400**   | `MISSING_QUERY`         | “Query text is required.”                                   | Empty `/chat` body.                        |
-| **401**   | `UNAUTHORIZED_DEBUG`    | “Debug endpoints are only available in development mode.”   | `DEBUG_MODE=False`.                        |
-| **404**   | `FILE_NOT_FOUND`        | “Referenced file not found or expired.”                     | Purged or invalid file ID.                 |
-| **408**   | `TIMEOUT_STAGE`         | “Processing timed out while .”                              | Stage exceeded configured timeout.         |
-| **422**   | `EMBEDDING_ERROR`       | “Embedding generation failed.”                              | Provider API error / invalid payload.      |
-| **422**   | `TRANSCRIPTION_ERROR`   | “Audio transcription failed.”                               | Whisper API failure or bad input.          |
-| **429**   | `RATE_LIMIT_EXCEEDED`   | “Service is temporarily busy. Please try again later.”      | Provider rate limit triggered.             |
-| **500**   | `INTERNAL_ERROR`        | “Unexpected server error. Please retry or contact support.” | Generic fallback for unhandled exceptions. |
-| **502**   | `LLM_PROVIDER_DOWN`     | “Model provider unavailable. Try again shortly.”            | Provider API outage.                       |
-| **503**   | `VECTOR_DB_UNAVAILABLE` | “Vector database temporarily unreachable.”                  | DB connection error.                       |
-| **504**   | `GENERATION_TIMEOUT`    | “Response generation took too long.”                        | LLM exceeded timeout.                      |
+| HTTP Code | Error Code | Description / Typical cause |
+| --------- | ---------- | --------------------------- |
+| 400 | `INVALID_FILE_TYPE` | Unsupported file format or incorrect MIME type. |
+| 400 | `INVALID_PDF_STRUCTURE` | PDF lacks a text layer after extraction. |
+| 400 | `FILE_TOO_LARGE` | Upload exceeds `max_upload_mb`. |
+| 400 | `AUDIO_TOO_LONG` | MP3 duration exceeds `max_audio_minutes`. |
+| 400 | `INVALID_DEBUG_STAGE` | Unsupported stage requested in `/debug/pipeline`. |
+| 400 | `MISSING_QUERY` | Chat request contains an empty query. |
+| 401 | `UNAUTHORIZED_DEBUG` | Debug endpoint invoked while `debug_mode` is false. |
+| 404 | `FILE_NOT_FOUND` | File ID not found or expired. |
+| 404 | `RESOURCE_NOT_FOUND` | Generic 404 for other routes/resources. |
+| 408 | `TIMEOUT_STAGE` | Stage exceeded configured timeout (extract/transcribe/prompt/retrieve). |
+| 422 | `INVALID_REQUEST` | Validation failure with optional hint in debug mode. |
+| 422 | `EMBEDDING_ERROR` | Embedding provider returned an error. |
+| 422 | `TRANSCRIPTION_ERROR` | Whisper/local transcription failed. |
+| 429 | `RATE_LIMIT_EXCEEDED` | Provider rate limit hit (embeddings, generation, transcription). |
+| 500 | `INTERNAL_ERROR` | Unhandled server error. |
+| 502 | `LLM_PROVIDER_DOWN` | LLM provider unreachable. |
+| 503 | `VECTOR_DB_UNAVAILABLE` | Vector store query failed. |
+| 504 | `GENERATION_TIMEOUT` | LLM exceeded configured timeout. |
 
-**Developer Logs (internal):** include stack traces, request IDs, and latency metrics (JSON-structured).  
-**User UI Feedback (Streamlit):** simplified, friendly messages; technical details hidden unless `DEBUG_MODE=True`.
+Front-end copies mirror these messages and append contextual hints when debug mode is active.
+
+---
+
+## 10. Testing and Quality Assurance
+
+- Automated pytest suite (`tests/test_quality_assurance.py`) validates:
+  - PDF ingestion → chat latency (<15 s) and contextual accuracy.
+  - Audio ingestion with stubbed transcription and retrieval quality.
+  - Admin purge endpoint (including storage cleanup and lifecycle restart trigger).
+  - Query routing heuristics and transcript cleaning behaviour.
+  - Configuration sourcing from environment variables and `.env` files.
+- Fixtures (`fixtures/sample_image_text.pdf`, `fixtures/sample_clean.mp3`) provide deterministic content for integration tests.
+- Postman collection (`docs/RAG Chatbot Debug Pipeline.postman_collection.json`) documents debug endpoints for manual validation.
+
+---
+
+## 11. Deployment Considerations
+
+- Run backend and frontend separately; ensure `storage/` is writable.
+- Provide required API keys via environment variables or `.env`. If operating in an offline environment, install `faster-whisper` and enable local transcription and the deterministic generation fallback suffices.
+- Disable debug mode (`RAG_DEBUG_MODE=false`) in production to protect admin endpoints.
+- Monitor structured logs for ingestion metrics, latency, and error spikes; integrate with log aggregation by parsing JSON payloads.
 
 ---
 
