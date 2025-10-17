@@ -35,6 +35,8 @@ def _secret_int(key: str, default: int) -> int:
 API_BASE = str(_secret_get("api_base", "http://localhost:8000"))
 DEBUG_MODE = _secret_bool("debug_mode", False)
 RETENTION_HOURS = _secret_int("retention_hours", 24)
+# Allow long-running ingestion requests (e.g. large audio transcriptions).
+REQUEST_TIMEOUT = _secret_int("request_timeout", 300)
 
 FRIENDLY_MESSAGES: Dict[str, str] = {
     "INVALID_FILE_TYPE": "Unsupported file format. Please upload a PDF or MP3 file.",
@@ -96,14 +98,14 @@ def _progress_status(initial_label: str) -> Iterator[ProgressUpdater]:
 
 def _post_multipart(endpoint: str, files: dict[str, tuple[str, bytes, str]]) -> dict[str, Any]:
     url = f"{API_BASE}{endpoint}"
-    response = requests.post(url, files=files, timeout=60)
+    response = requests.post(url, files=files, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
 
 
 def _post_json(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
     url = f"{API_BASE}{endpoint}"
-    response = requests.post(url, json=payload, timeout=60)
+    response = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
 
