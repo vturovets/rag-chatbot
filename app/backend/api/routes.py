@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from uuid import UUID
 
 from app.backend import exceptions
 from app.backend.config import Settings, get_settings
@@ -98,8 +99,10 @@ def _is_mp3_upload(file: UploadFile) -> bool:
 @router.post("/upload/pdf", response_model=UploadResponse)
 async def upload_pdf(
     file: UploadFile = File(...),
+    session_id: UUID | None = Form(default=None),
     pipeline: PipelineService = Depends(get_pipeline),
     storage: FileStorage = Depends(get_storage),
+    sessions: SessionStore = Depends(get_session_store),
 ) -> UploadResponse:
     if not _is_pdf_upload(file):
         raise exceptions.invalid_file_type()
@@ -109,6 +112,8 @@ async def upload_pdf(
     except Exception:
         storage.purge(metadata.file_id)
         raise
+    context = sessions.associate_files(session_id, [metadata.file_id])
+
     return UploadResponse(
         file_id=metadata.file_id,
         filename=metadata.filename,
@@ -116,14 +121,17 @@ async def upload_pdf(
         source=metadata.source or metadata.kind.value,
         page_count=extraction.pages,
         expires_at=metadata.expires_at,
+        session_id=context.session_id,
     )
 
 
 @router.post("/upload/audio", response_model=UploadResponse)
 async def upload_audio(
     file: UploadFile = File(...),
+    session_id: UUID | None = Form(default=None),
     pipeline: PipelineService = Depends(get_pipeline),
     storage: FileStorage = Depends(get_storage),
+    sessions: SessionStore = Depends(get_session_store),
 ) -> UploadResponse:
     if not _is_mp3_upload(file):
         raise exceptions.invalid_file_type()
@@ -133,6 +141,8 @@ async def upload_audio(
     except Exception:
         storage.purge(metadata.file_id)
         raise
+    context = sessions.associate_files(session_id, [metadata.file_id])
+
     return UploadResponse(
         file_id=metadata.file_id,
         filename=metadata.filename,
@@ -140,6 +150,7 @@ async def upload_audio(
         source=metadata.source or metadata.kind.value,
         duration_seconds=transcription.duration_seconds,
         expires_at=metadata.expires_at,
+        session_id=context.session_id,
     )
 
 

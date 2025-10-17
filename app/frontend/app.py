@@ -96,9 +96,14 @@ def _progress_status(initial_label: str) -> Iterator[ProgressUpdater]:
             pass
 
 
-def _post_multipart(endpoint: str, files: dict[str, tuple[str, bytes, str]]) -> dict[str, Any]:
+def _post_multipart(
+    endpoint: str,
+    files: dict[str, tuple[str, bytes, str]],
+    *,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     url = f"{API_BASE}{endpoint}"
-    response = requests.post(url, files=files, timeout=REQUEST_TIMEOUT)
+    response = requests.post(url, files=files, data=data, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
 
@@ -254,12 +259,20 @@ def _render_chat_history() -> None:
 
 
 def _handle_ingestion(file, endpoint: str) -> None:
+    _ensure_chat_session()
+    session_id = st.session_state.chat_session.get("session_id")
+
     buffer = file.getvalue()
     mime_type = file.type or "application/octet-stream"
     with _progress_status("Preparing upload...") as update_status:
         update_status("Uploading file to the server...")
         try:
-            response = _post_multipart(endpoint, {"file": (file.name, buffer, mime_type)})
+            form_data = {"session_id": str(session_id)} if session_id else None
+            response = _post_multipart(
+                endpoint,
+                {"file": (file.name, buffer, mime_type)},
+                data=form_data,
+            )
         except requests.RequestException as exc:  # pragma: no cover - UI only
             update_status("Upload failed.", state="error")
             _handle_request_error(exc)
@@ -270,6 +283,10 @@ def _handle_ingestion(file, endpoint: str) -> None:
         update_status("File is ready for chat.", state="complete")
 
     _render_ingestion_success(response)
+
+    new_session_id = response.get("session_id")
+    if new_session_id:
+        st.session_state.chat_session["session_id"] = new_session_id
 
 
 def _render_ingest_tab() -> None:
