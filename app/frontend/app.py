@@ -302,15 +302,6 @@ def _render_chat_tab() -> None:
     st.subheader("Chat with your knowledge base")
     st.write("Ask questions about the files you've ingested during this session.")
 
-    action_col = st.columns([3, 1])[1]
-    with action_col:
-        if st.button("Start new chat", use_container_width=True):
-            _reset_chat_session()
-            toast = getattr(st, "toast", None)
-            if callable(toast):
-                toast("Started a fresh chat session.")
-            st.experimental_rerun()
-
     _render_chat_history()
 
     if prompt := st.chat_input("Ask a question about your uploaded content"):
