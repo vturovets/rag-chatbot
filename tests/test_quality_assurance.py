@@ -284,6 +284,60 @@ def test_debug_embed_accepts_chunk_payload(client):
     assert vectors_info["dim"] > 0
 
 
+def test_debug_extract_reports_pdf_statistics(client):
+    with _open_fixture("sample_image_text.pdf") as stream:
+        upload = client.post(
+            "/upload/pdf",
+            files={"file": ("sample_image_text.pdf", stream, "application/pdf")},
+        )
+    assert upload.status_code == 200, upload.text
+    file_id = upload.json()["file_id"]
+
+    response = client.post(
+        "/debug/pipeline",
+        params={"break_at": "extract"},
+        json={"file_id": file_id},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert len(payload["stages"]) == 1
+    extract_stage = payload["stages"][0]
+    assert extract_stage["stage"] == "extract"
+    output = extract_stage["output_payload"]
+    assert output["pages"] >= 1
+    assert output["characters"] > 100
+    assert output["words"] > 10
+    assert len(output["sha256"]) == 64
+    assert output["text_preview"], "Expected preview text in extract diagnostics"
+
+
+def test_debug_extract_reports_audio_statistics(client, stub_transcription):
+    with _open_fixture("sample_clean.mp3") as stream:
+        upload = client.post(
+            "/upload/audio",
+            files={"file": ("sample_clean.mp3", stream, "audio/mpeg")},
+        )
+    assert upload.status_code == 200, upload.text
+    file_id = upload.json()["file_id"]
+
+    response = client.post(
+        "/debug/pipeline",
+        params={"break_at": "extract"},
+        json={"file_id": file_id},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert len(payload["stages"]) == 1
+    extract_stage = payload["stages"][0]
+    assert extract_stage["stage"] == "extract"
+    output = extract_stage["output_payload"]
+    assert output["duration_seconds"] > 0
+    assert output["characters"] > 50
+    assert output["words"] > 5
+    assert len(output["sha256"]) == 64
+    assert output["transcript_preview"], "Expected transcript preview in extract diagnostics"
+
+
 def test_chat_missing_query_validation(client):
     response = client.post(
         "/chat",

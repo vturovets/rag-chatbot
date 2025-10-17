@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 import time
@@ -320,6 +321,20 @@ class PipelineService:
         return f"{cleaned[:limit].rstrip()}..."
 
     @staticmethod
+    def _summarize_text(text: str) -> dict[str, object]:
+        cleaned = text.strip()
+        characters = len(cleaned)
+        words = len(cleaned.split()) if cleaned else 0
+        digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest() if cleaned else ""
+        preview = PipelineService._preview_text(cleaned)
+        return {
+            "characters": characters,
+            "words": words,
+            "sha256": digest,
+            "preview": preview,
+        }
+
+    @staticmethod
     def _precision_sample(hits: Sequence[RetrievalHit], top_k: int) -> dict[str, object]:
         if not hits:
             return {"top_k": top_k, "estimated": 0.0, "threshold": 0.6, "scores": [], "sampled": 0}
@@ -504,11 +519,22 @@ class PipelineService:
             if metadata.kind == FileKind.PDF:
                 extraction = await self._extraction.extract_pdf(request.file_id)
                 extracted_text = extraction.text
+                extract_summary = self._summarize_text(extraction.text)
                 extract_output = extraction.model_dump()
+                extract_output.update(
+                    {
+                        "characters": extract_summary["characters"],
+                        "words": extract_summary["words"],
+                        "sha256": extract_summary["sha256"],
+                    }
+                )
                 if not raw:
                     extract_output = {
                         "pages": extraction.pages,
-                        "text": self._preview_text(extraction.text),
+                        "characters": extract_summary["characters"],
+                        "words": extract_summary["words"],
+                        "sha256": extract_summary["sha256"],
+                        "text_preview": extract_summary["preview"],
                     }
                 extract_input: dict[str, object] = {
                     "file_id": str(request.file_id),
@@ -517,11 +543,22 @@ class PipelineService:
             else:
                 transcription = await self._extraction.transcribe_audio(request.file_id)
                 extracted_text = transcription.transcript
+                extract_summary = self._summarize_text(transcription.transcript)
                 extract_output = transcription.model_dump()
+                extract_output.update(
+                    {
+                        "characters": extract_summary["characters"],
+                        "words": extract_summary["words"],
+                        "sha256": extract_summary["sha256"],
+                    }
+                )
                 if not raw:
                     extract_output = {
                         "duration_seconds": transcription.duration_seconds,
-                        "transcript": self._preview_text(transcription.transcript),
+                        "characters": extract_summary["characters"],
+                        "words": extract_summary["words"],
+                        "sha256": extract_summary["sha256"],
+                        "transcript_preview": extract_summary["preview"],
                     }
                 extract_input = {
                     "file_id": str(request.file_id),
