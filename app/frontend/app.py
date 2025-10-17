@@ -36,7 +36,7 @@ API_BASE = str(_secret_get("api_base", "http://localhost:8000"))
 DEBUG_MODE = _secret_bool("debug_mode", False)
 RETENTION_HOURS = _secret_int("retention_hours", 24)
 # Allow long-running ingestion requests (e.g. large audio transcriptions).
-REQUEST_TIMEOUT = _secret_int("request_timeout", 300)
+REQUEST_TIMEOUT = _secret_int("request_timeout", 600)
 
 FRIENDLY_MESSAGES: Dict[str, str] = {
     "INVALID_FILE_TYPE": "Unsupported file format. Please upload a PDF or MP3 file.",
