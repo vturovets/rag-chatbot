@@ -61,6 +61,8 @@ class FileStorage:
         if not metadata_path.exists():
             raise exceptions.file_not_found()
         metadata = FileMetadata.model_validate_json(metadata_path.read_text(encoding="utf-8"))
+        if metadata.source is None:
+            metadata.source = metadata.kind.value
         record = FileRecord(metadata=metadata, path=self._data_path(file_id))
         self._registry[file_id] = record
         return record
@@ -92,6 +94,7 @@ class FileStorage:
             uploaded_at=uploaded_at,
             expires_at=uploaded_at + self._retention,
             kind=kind,
+            source=kind.value,
         )
 
         destination = self._data_path(metadata.file_id)

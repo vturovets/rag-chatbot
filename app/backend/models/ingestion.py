@@ -26,6 +26,7 @@ class FileMetadata(BaseModel):
     uploaded_at: datetime = Field(default_factory=datetime.utcnow)
     expires_at: datetime = Field(default_factory=lambda: datetime.utcnow() + timedelta(hours=24))
     kind: FileKind
+    source: str | None = None
 
     def has_expired(self, reference: datetime | None = None) -> bool:
         """Return True if the metadata has expired relative to ``reference``."""
@@ -50,6 +51,7 @@ class UploadResponse(BaseModel):
     file_id: UUID
     filename: str
     kind: FileKind
+    source: str
     page_count: int | None = None
     duration_seconds: float | None = None
     expires_at: datetime
