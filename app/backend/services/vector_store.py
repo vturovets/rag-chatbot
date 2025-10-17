@@ -19,6 +19,7 @@ except ModuleNotFoundError:  # pragma: no cover - executed when chromadb is miss
 
 from app.backend.config import get_settings
 from app.backend.models.chat import Chunk, EmbedVector, RetrievalHit
+from app.backend.models.ingestion import FileKind
 from app.backend.services.embeddings import EmbeddingService
 
 
@@ -153,7 +154,12 @@ class VectorStore:
         ids = [str(chunk.chunk_id) for chunk in chunk_list]
         documents = [chunk.text for chunk in chunk_list]
         metadatas = [
-            {"chunk_id": str(chunk.chunk_id), "source_file_id": str(chunk.source_file_id), "order": chunk.order}
+            {
+                "chunk_id": str(chunk.chunk_id),
+                "source_file_id": str(chunk.source_file_id),
+                "order": chunk.order,
+                "source": chunk.source.value,
+            }
             for chunk in chunk_list
         ]
         embeddings = [vector.values for vector in vector_list]
@@ -167,6 +173,7 @@ class VectorStore:
         top_k: int,
         *,
         allowed_source_ids: Optional[Iterable[UUID]] = None,
+        source_filter: Optional[Iterable[FileKind]] = None,
     ) -> List[RetrievalHit]:
         if top_k <= 0:
             return []
@@ -197,13 +204,27 @@ class VectorStore:
             return []
 
         if self._use_in_memory:
-            return self._similarity_search_in_memory(fingerprint, query_vector, top_k, allowed_source_ids)
+            return self._similarity_search_in_memory(
+                fingerprint,
+                query_vector,
+                top_k,
+                allowed_source_ids,
+                source_filter,
+            )
 
-        where_clause = None
+        where_clause: Dict[str, object] | None = None
         if allowed_source_ids:
             identifiers = [str(file_id) for file_id in allowed_source_ids]
             if identifiers:
                 where_clause = {"source_file_id": {"$in": identifiers}}
+        if source_filter:
+            sources = [kind.value for kind in source_filter]
+            if sources:
+                source_clause = {"source": {"$in": sources}}
+                if where_clause is None:
+                    where_clause = source_clause
+                else:
+                    where_clause.update(source_clause)
 
         try:
             results = collection.query(
@@ -233,12 +254,20 @@ class VectorStore:
             except (TypeError, ValueError):
                 continue
             similarity = 1 - float(distance) if distance is not None else 0.0
+            source_value = metadata.get("source")
+            try:
+                source_kind = FileKind(source_value) if source_value is not None else None
+            except ValueError:
+                source_kind = None
+            if source_kind is None:
+                source_kind = FileKind.PDF
             hits.append(
                 RetrievalHit(
                     chunk_id=chunk_uuid,
                     score=similarity,
                     text=document or "",
                     source_file_id=source_uuid,
+                    source=source_kind,
                 )
             )
 
@@ -337,14 +366,18 @@ class VectorStore:
         query_vector: List[float],
         top_k: int,
         allowed_source_ids: Optional[Iterable[UUID]],
+        source_filter: Optional[Iterable[FileKind]],
     ) -> List[RetrievalHit]:
         store = self._memory_entries.get(fingerprint)
         if not store:
             return []
         allowed = set(allowed_source_ids or [])
+        allowed_sources = {kind for kind in source_filter} if source_filter else None
         hits: List[RetrievalHit] = []
         for chunk, vector in store.values():
             if allowed and chunk.source_file_id not in allowed:
+                continue
+            if allowed_sources and chunk.source not in allowed_sources:
                 continue
             similarity = self._cosine_similarity(query_vector, vector)
             hits.append(
@@ -353,6 +386,7 @@ class VectorStore:
                     score=similarity,
                     text=chunk.text,
                     source_file_id=chunk.source_file_id,
+                    source=chunk.source,
                 )
             )
         hits.sort(key=lambda item: item.score, reverse=True)

@@ -8,7 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.backend import exceptions
+from app.backend.models.ingestion import FileKind
 from app.backend.services.extraction import ExtractionService, LocalTranscriber, OpenAIError
+from app.backend.services.pipeline import PipelineService
 
 FIXTURES_DIR = Path("fixtures")
 
@@ -22,7 +24,8 @@ def stub_transcription(monkeypatch):
     async def _fake_transcribe(self, path):
         assert path.exists()
         return (
-            "This recording outlines the launch schedule and readiness review for the Mars habitat program."
+            "Uh thank you everyone, so yeah this recording outlines the launch schedule and "
+            "readiness review for the Mars habitat program before we have one question."
         )
 
     monkeypatch.setattr(ExtractionService, "_transcribe_with_whisper", _fake_transcribe)
@@ -37,6 +40,7 @@ def test_pdf_ingestion_and_chat_latency(client):
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["page_count"] >= 1
+    assert payload["source"] == FileKind.PDF.value
 
     chat_response = client.post(
         "/chat",
@@ -58,6 +62,7 @@ def test_audio_ingestion_and_retrieval(client, stub_transcription):
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["duration_seconds"] > 0
+    assert payload["source"] == FileKind.AUDIO.value
 
     chat_response = client.post(
         "/chat",
@@ -126,6 +131,27 @@ def test_admin_purge_triggers_restart(monkeypatch):
     assert triggered.get("called") is True
     assert triggered.get("action_callable") is True
     assert triggered.get("delay") == pytest.approx(0.0)
+
+
+def test_query_router_heuristics():
+    pdf_only = PipelineService._route_query_sources("Which slide covers the mission timeline?")
+    assert pdf_only == [FileKind.PDF]
+
+    audio_only = PipelineService._route_query_sources("Summarize the interview with the mission speaker")
+    assert audio_only == [FileKind.AUDIO]
+
+    hybrid = PipelineService._route_query_sources("Provide a general project overview")
+    assert hybrid == [FileKind.PDF, FileKind.AUDIO]
+
+
+def test_transcript_cleaning_removes_fillers():
+    service = PipelineService()
+    messy = "Uh thank you, so yeah we have one question before the discussion continues about launch readiness."
+    cleaned = service._clean_transcript(messy)
+    normalized = cleaned.lower()
+    for phrase in ["uh", "thank you", "so yeah", "we have one question"]:
+        assert phrase not in normalized
+    assert "discussion continues about launch readiness" in normalized
 
 
 def test_extraction_service_uses_rag_openai_key(monkeypatch):

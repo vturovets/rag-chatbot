@@ -7,6 +7,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.backend.models.ingestion import FileKind
+
 
 class Chunk(BaseModel):
     """A normalized chunk of source content."""
@@ -15,6 +17,7 @@ class Chunk(BaseModel):
     text: str
     source_file_id: UUID
     order: int
+    source: FileKind
 
 
 class EmbedVector(BaseModel):
@@ -31,6 +34,7 @@ class RetrievalHit(BaseModel):
     score: float
     text: str
     source_file_id: UUID
+    source: FileKind
 
 
 class ChatRequest(BaseModel):

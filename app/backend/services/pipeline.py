@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import logging
 import math
+import re
 import time
 from dataclasses import asdict
 from typing import List, Sequence
@@ -50,6 +51,37 @@ logger = logging.getLogger(__name__)
 
 class PipelineService:
     """Coordinate ingestion, retrieval, and generation."""
+
+    _PDF_ROUTING_KEYWORDS = {
+        "slide",
+        "slides",
+        "figure",
+        "figures",
+        "list",
+        "lists",
+        "dos",
+        "donts",
+        "do's",
+        "don'ts",
+    }
+    _AUDIO_ROUTING_KEYWORDS = {
+        "interview",
+        "interviews",
+        "discussion",
+        "discussions",
+        "speaker",
+        "speakers",
+        "recording",
+        "podcast",
+    }
+    _FILLER_PATTERNS = [
+        r"\bthank you\b",
+        r"\bso yeah\b",
+        r"\bso uh\b",
+        r"\buh\b",
+        r"\bum\b",
+        r"\bwe have (?:one|a) question(?: left)?\b",
+    ]
 
     def __init__(
         self,
@@ -139,23 +171,27 @@ class PipelineService:
         return transcription
 
     def _index_extracted_text(self, extraction: ExtractionResult, file_id: UUID) -> dict[str, float | int]:
-        return self._index_text(extraction.text, file_id)
+        return self._index_text(extraction.text, file_id, source=FileKind.PDF)
 
     def _index_transcript(self, transcription: TranscriptionResult, file_id: UUID) -> dict[str, float | int]:
-        return self._index_text(transcription.transcript, file_id)
+        cleaned_transcript = self._clean_transcript(transcription.transcript)
+        transcription.transcript = cleaned_transcript
+        return self._index_text(cleaned_transcript, file_id, source=FileKind.AUDIO)
 
-    def _chunk_text(self, text: str, file_id: UUID) -> tuple[List[Chunk], List[NormalizedChunk]]:
+    def _chunk_text(
+        self, text: str, file_id: UUID, *, source: FileKind
+    ) -> tuple[List[Chunk], List[NormalizedChunk]]:
         config = ChunkConfig(chunk_size=self._settings.chunk_size, chunk_overlap=self._settings.chunk_overlap)
         normalized = chunk_text(text, config)
         chunks = [
-            Chunk(text=piece.text, source_file_id=file_id, order=order)
+            Chunk(text=piece.text, source_file_id=file_id, order=order, source=source)
             for order, piece in enumerate(normalized)
         ]
         return chunks, normalized
 
-    def _index_text(self, text: str, file_id: UUID) -> dict[str, float | int]:
+    def _index_text(self, text: str, file_id: UUID, *, source: FileKind) -> dict[str, float | int]:
         chunk_start = time.perf_counter()
-        chunks, normalized = self._chunk_text(text, file_id)
+        chunks, normalized = self._chunk_text(text, file_id, source=source)
         chunk_ms = int((time.perf_counter() - chunk_start) * 1000)
 
         try:
@@ -185,6 +221,83 @@ class PipelineService:
             "token_total": token_total,
             "token_avg": avg_tokens,
         }
+
+    def _clean_transcript(self, transcript: str) -> str:
+        cleaned = (transcript or "").replace("’", "'")
+        for pattern in self._FILLER_PATTERNS:
+            cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    @classmethod
+    def _route_query_sources(cls, query: str) -> List[FileKind]:
+        normalized = (query or "").lower().replace("’", "'")
+        tokens = set(re.findall(r"[a-z']+", normalized))
+
+        def _has_keyword(keywords: set[str]) -> bool:
+            if any(keyword in tokens for keyword in keywords):
+                return True
+            for keyword in keywords:
+                if " " in keyword and keyword in normalized:
+                    return True
+            return False
+
+        prefers_pdf = _has_keyword(cls._PDF_ROUTING_KEYWORDS)
+        prefers_audio = _has_keyword(cls._AUDIO_ROUTING_KEYWORDS)
+
+        if prefers_pdf and not prefers_audio:
+            return [FileKind.PDF]
+        if prefers_audio and not prefers_pdf:
+            return [FileKind.AUDIO]
+        if prefers_pdf and prefers_audio:
+            return [FileKind.PDF, FileKind.AUDIO]
+        return [FileKind.PDF, FileKind.AUDIO]
+
+    def _routed_similarity_search(
+        self,
+        query: str,
+        top_k: int,
+        *,
+        allowed_source_ids: Sequence[UUID],
+    ) -> List[RetrievalHit]:
+        allowed_ids = list(allowed_source_ids)
+        plan = self._route_query_sources(query)
+        hits: List[RetrievalHit] = []
+        seen: set[UUID] = set()
+
+        for index, source in enumerate(plan):
+            if len(hits) >= top_k:
+                break
+            remaining = top_k - len(hits)
+            fetch_k = top_k if len(plan) == 1 or index == 0 else remaining
+            if fetch_k <= 0:
+                break
+            source_hits = self._vector_store.similarity_search(
+                query,
+                fetch_k,
+                allowed_source_ids=allowed_ids,
+                source_filter=[source],
+            )
+            for hit in source_hits:
+                if hit.chunk_id in seen:
+                    continue
+                hits.append(hit)
+                seen.add(hit.chunk_id)
+                if len(hits) >= top_k:
+                    break
+
+        if hits:
+            hits.sort(key=lambda item: item.score, reverse=True)
+            return hits[:top_k]
+
+        fallback_hits = self._vector_store.similarity_search(
+            query,
+            top_k,
+            allowed_source_ids=allowed_ids,
+        )
+        if fallback_hits:
+            return fallback_hits
+        return self._vector_store.similarity_search(query, top_k)
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         if not request.query.strip():
@@ -246,14 +359,7 @@ class PipelineService:
         allowed_source_ids: Sequence[UUID],
     ) -> List[RetrievalHit]:
         def _search() -> List[RetrievalHit]:
-            hits = self._vector_store.similarity_search(
-                query,
-                top_k,
-                allowed_source_ids=allowed_source_ids,
-            )
-            if not hits:
-                hits = self._vector_store.similarity_search(query, top_k)
-            return hits
+            return self._routed_similarity_search(query, top_k, allowed_source_ids=allowed_source_ids)
 
         try:
             return await asyncio.wait_for(
@@ -360,7 +466,7 @@ class PipelineService:
         return cleaned[:120] or "debug pipeline probe"
 
     def _build_chunks_from_payload(
-        self, payloads: Sequence[DebugChunkPayload], source_file_id: UUID
+        self, payloads: Sequence[DebugChunkPayload], source_file_id: UUID, *, source: FileKind
     ) -> tuple[List[Chunk], List[NormalizedChunk]]:
         normalized: List[NormalizedChunk] = []
         chunks: List[Chunk] = []
@@ -385,6 +491,7 @@ class PipelineService:
                     text=text,
                     source_file_id=source_file_id,
                     order=payload.order,
+                    source=source,
                 )
             )
             start_token = end_token
@@ -417,6 +524,7 @@ class PipelineService:
                     score=score,
                     text=chunk.text,
                     source_file_id=chunk.source_file_id,
+                    source=chunk.source,
                 )
             )
         return hits
@@ -515,6 +623,7 @@ class PipelineService:
 
         if request.file_id is not None:
             metadata = self._storage.get_metadata(request.file_id)
+            source_kind = metadata.kind
 
             if metadata.kind == FileKind.PDF:
                 extraction = await self._extraction.extract_pdf(request.file_id)
@@ -542,8 +651,10 @@ class PipelineService:
                 }
             else:
                 transcription = await self._extraction.transcribe_audio(request.file_id)
-                extracted_text = transcription.transcript
-                extract_summary = self._summarize_text(transcription.transcript)
+                cleaned_transcript = self._clean_transcript(transcription.transcript)
+                transcription.transcript = cleaned_transcript
+                extracted_text = cleaned_transcript
+                extract_summary = self._summarize_text(cleaned_transcript)
                 extract_output = transcription.model_dump()
                 extract_output.update(
                     {
@@ -576,6 +687,7 @@ class PipelineService:
                 return DebugPipelineResponse(stages=stages)
             extracted_source_id = request.file_id
         else:
+            source_kind = FileKind.PDF
             if target_stage != "chunk" and not sorted_chunk_payloads:
                 raise exceptions.invalid_request(
                     hint="file_id or chunks payload is required to debug stages beyond chunk."
@@ -594,12 +706,17 @@ class PipelineService:
             and not inline_text
         ):
             chunks, normalized_chunks = self._build_chunks_from_payload(
-                sorted_chunk_payloads, extracted_source_id
+                sorted_chunk_payloads, extracted_source_id, source=source_kind
             )
         else:
             normalized_chunks = chunk_text(extracted_text, chunk_config)
             chunks = [
-                Chunk(text=piece.text, source_file_id=extracted_source_id, order=order)
+                Chunk(
+                    text=piece.text,
+                    source_file_id=extracted_source_id,
+                    order=order,
+                    source=source_kind,
+                )
                 for order, piece in enumerate(normalized_chunks)
             ]
         total_tokens = sum(item.token_count for item in normalized_chunks)

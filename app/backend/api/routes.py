@@ -113,6 +113,7 @@ async def upload_pdf(
         file_id=metadata.file_id,
         filename=metadata.filename,
         kind=metadata.kind,
+        source=metadata.source or metadata.kind.value,
         page_count=extraction.pages,
         expires_at=metadata.expires_at,
     )
@@ -136,6 +137,7 @@ async def upload_audio(
         file_id=metadata.file_id,
         filename=metadata.filename,
         kind=metadata.kind,
+        source=metadata.source or metadata.kind.value,
         duration_seconds=transcription.duration_seconds,
         expires_at=metadata.expires_at,
     )
