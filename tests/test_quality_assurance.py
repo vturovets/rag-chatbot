@@ -41,10 +41,14 @@ def test_pdf_ingestion_and_chat_latency(client):
     payload = response.json()
     assert payload["page_count"] >= 1
     assert payload["source"] == FileKind.PDF.value
+    assert payload["session_id"]
 
     chat_response = client.post(
         "/chat",
-        json={"query": "What does GGUF stand for and how is it used?"},
+        json={
+            "query": "What does GGUF stand for and how is it used?",
+            "session_id": payload["session_id"],
+        },
     )
     assert chat_response.status_code == 200, chat_response.text
     chat_payload = chat_response.json()
@@ -63,10 +67,14 @@ def test_audio_ingestion_and_retrieval(client, stub_transcription):
     payload = response.json()
     assert payload["duration_seconds"] > 0
     assert payload["source"] == FileKind.AUDIO.value
+    assert payload["session_id"]
 
     chat_response = client.post(
         "/chat",
-        json={"query": "Summarize the launch readiness update from the recording."},
+        json={
+            "query": "Summarize the launch readiness update from the recording.",
+            "session_id": payload["session_id"],
+        },
     )
     assert chat_response.status_code == 200, chat_response.text
     answer = chat_response.json()["answer"].lower()

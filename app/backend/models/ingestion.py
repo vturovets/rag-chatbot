@@ -55,6 +55,7 @@ class UploadResponse(BaseModel):
     page_count: int | None = None
     duration_seconds: float | None = None
     expires_at: datetime
+    session_id: UUID | None = None
 
 
 class ExtractionResult(BaseModel):
